@@ -71,19 +71,6 @@ export interface EsportLeaderboardEntry {
   iconId?: number;
 }
 
-const FALLBACK_RANKED_LEADERS: RankedLeaderboardEntry[] = [
-  { tag: "#P0LY8J2Q", name: "Nova", rank: 1, score: 11820, icon: { id: 28000000 } },
-  { tag: "#Q2GCUV9L", name: "Raven", rank: 2, score: 11040, icon: { id: 28000000 } },
-  { tag: "#8YJ0Q2PC", name: "Kyro", rank: 3, score: 10480, icon: { id: 28000000 } },
-  { tag: "#2L8Q9JVC", name: "Pulse", rank: 4, score: 9950, icon: { id: 28000000 } },
-  { tag: "#9Q2PUV8C", name: "Styx", rank: 5, score: 9620, icon: { id: 28000000 } },
-  { tag: "#Y8Q2LCVP", name: "Mako", rank: 6, score: 9310, icon: { id: 28000000 } },
-  { tag: "#CUV2Q8PJ", name: "Astra", rank: 7, score: 9020, icon: { id: 28000000 } },
-  { tag: "#VQ2Y8LPC", name: "Shade", rank: 8, score: 8890, icon: { id: 28000000 } },
-  { tag: "#P2Q8LCVY", name: "Keen", rank: 9, score: 8610, icon: { id: 28000000 } },
-  { tag: "#J8Q2PCVY", name: "Echo", rank: 10, score: 8360, icon: { id: 28000000 } }
-];
-
 const FALLBACK_ESPORT_LEADERS: EsportLeaderboardEntry[] = [
   {
     tag: "#P0LY8J2Q",
@@ -166,14 +153,6 @@ const FALLBACK_ESPORT_LEADERS: EsportLeaderboardEntry[] = [
     iconId: 28000000
   }
 ];
-
-function fallbackRankedLeaders(limit: number): RankedLeaderboardEntry[] {
-  return FALLBACK_RANKED_LEADERS.slice(0, limit).map((entry, index) => ({
-    ...entry,
-    rank: index + 1,
-    icon: entry.icon ?? { id: 28000000 }
-  }));
-}
 
 function fallbackEsportLeaders(limit: number): EsportLeaderboardEntry[] {
   return FALLBACK_ESPORT_LEADERS.slice(0, limit);
@@ -349,6 +328,68 @@ function asUnknownRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+async function getTrackedRankedLeaders(limit: number): Promise<RankedLeaderboardEntry[]> {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return [];
+
+  const query = await supabase
+    .from("players")
+    .select("tag,name,icon_id,raw_payload,last_seen_at")
+    .order("last_seen_at", { ascending: false })
+    .limit(800);
+
+  if (query.error) {
+    throw new Error(`Supabase read tracked ranked players error: ${query.error.message}`);
+  }
+
+  const rows = (query.data ?? []) as Array<{
+    tag?: string | null;
+    name?: string | null;
+    icon_id?: number | null;
+    raw_payload?: unknown;
+    last_seen_at?: string | null;
+  }>;
+
+  const parsed = rows
+    .map((row) => {
+      const tag = normalizeTag(String(row.tag ?? ""));
+      if (tag === "#") return null;
+      const score = extractRankedData(row.raw_payload ?? null);
+      if (score <= 0) return null;
+      return {
+        tag,
+        name: String(row.name ?? tag),
+        score,
+        iconId: Number(row.icon_id ?? 28000000),
+        lastSeenAt: String(row.last_seen_at ?? "")
+      };
+    })
+    .filter((entry): entry is { tag: string; name: string; score: number; iconId: number; lastSeenAt: string } => entry !== null);
+
+  const dedupedByTag = new Map<string, { tag: string; name: string; score: number; iconId: number; lastSeenAt: string }>();
+  for (const entry of parsed) {
+    const existing = dedupedByTag.get(entry.tag);
+    if (!existing) {
+      dedupedByTag.set(entry.tag, entry);
+      continue;
+    }
+    if (entry.score > existing.score) {
+      dedupedByTag.set(entry.tag, entry);
+    }
+  }
+
+  return [...dedupedByTag.values()]
+    .sort((a, b) => b.score - a.score || b.lastSeenAt.localeCompare(a.lastSeenAt))
+    .slice(0, limit)
+    .map((entry, index) => ({
+      tag: entry.tag,
+      name: entry.name,
+      rank: index + 1,
+      score: entry.score,
+      icon: { id: entry.iconId }
+    }));
+}
+
 function rankTierFloorFromLabel(value: unknown): number {
   if (typeof value !== "string") return 0;
   const normalized = value
@@ -467,8 +508,7 @@ export async function getTopRankedPlayers(limit = 10): Promise<RankedLeaderboard
               item.ranked_elo ??
               item.elo ??
               item.powerLeagueElo ??
-              item.power_league_elo ??
-              item.value
+              item.power_league_elo
           );
           // Garde-fou: évite d'afficher des faux ELO (1..10) quand l'endpoint n'expose pas le score ranked.
           if (score < 100) return null;
@@ -493,49 +533,16 @@ export async function getTopRankedPlayers(limit = 10): Promise<RankedLeaderboard
     }
   }
 
-  // Fallback: use world top players and derive ranked score from each live profile.
-  let worldTop: PlayerRanking[] = [];
-  try {
-    worldTop = await getTopPlayers(Math.max(limit, 10));
-  } catch {
-    return fallbackRankedLeaders(limit);
+  // L'API officielle n'expose pas toujours un leaderboard ranked global exploitable.
+  // Fallback fiable: classement des joueurs déjà suivis et stockés en base.
+  const tracked = await getTrackedRankedLeaders(limit);
+  if (tracked.length > 0) {
+    return tracked;
   }
-  const enriched = await Promise.all(
-    worldTop.map(async (entry) => {
-      try {
-        const profile = await getPlayer(entry.tag);
-        const highestRankedScore = extractRankedData(profile);
-        return {
-          tag: entry.tag,
-          name: profile.name || entry.name,
-          rank: entry.rank,
-          // End-of-season fallback: classement simulé par peak classé.
-          score: highestRankedScore,
-          icon: { id: profile.icon?.id ?? entry.icon?.id ?? 28000000 }
-        } satisfies RankedLeaderboardEntry;
-      } catch {
-        return {
-          tag: entry.tag,
-          name: entry.name,
-          rank: entry.rank,
-          score: 0,
-          icon: { id: entry.icon?.id ?? 28000000 }
-        } satisfies RankedLeaderboardEntry;
-      }
-    })
+
+  throw new Error(
+    "Classement ranked global indisponible via l'API officielle. Ajoute des joueurs suivis pour alimenter ce top."
   );
-
-  const derived = enriched
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map((entry, index) => ({ ...entry, rank: index + 1 }));
-
-  if (derived.length > 0) {
-    return derived;
-  }
-
-  return fallbackRankedLeaders(limit);
 }
 
 export async function getTopEsportLeaders(limit = 10): Promise<EsportLeaderboardEntry[]> {

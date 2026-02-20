@@ -75,7 +75,7 @@ export function PlayerTabs({
     [history]
   );
 
-  const rankedLabel = rankedElo > 0 ? formatRank(rankedElo) : "Non classe";
+  const rankedLabel = rankedElo > 0 ? formatRank(rankedElo) : "Indisponible";
   const rankedPeak = Math.max(rankedElo, Number(highestRankedTrophies ?? 0));
 
   const rankedMaps = analytics.mapsRanked.slice(0, 5).map((map) => `${map.map} - ${map.matches} matchs (${map.winrate}%)`);
@@ -93,6 +93,10 @@ export function PlayerTabs({
   const rankedBans = analytics.rankedBans
     .slice(0, 6)
     .map((ban) => `${ban.name} - ${ban.bans} bans`);
+  const rankedBansRows =
+    rankedBans.length > 0
+      ? rankedBans
+      : ["Non disponible via l'API officielle (bans non exposes dans le battlelog recent)."];
 
   return (
     <section className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
@@ -124,7 +128,9 @@ export function PlayerTabs({
             <article className="rounded-2xl border border-slate-200 bg-white p-4">
               <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Niveau Ranked</p>
               <p className="mt-2 text-2xl font-semibold text-slate-900">{rankedLabel}</p>
-              <p className="text-sm text-slate-600">{rankedElo > 0 ? `${stat(rankedElo)} ELO` : "Pas de score visible"}</p>
+              <p className="text-sm text-slate-600">
+                {rankedElo > 0 ? `${stat(rankedElo)} ELO` : "L'API officielle ne fournit pas le rang actuel."}
+              </p>
             </article>
             <article className="rounded-2xl border border-slate-200 bg-white p-4">
               <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Winrate Ranked</p>
@@ -150,9 +156,9 @@ export function PlayerTabs({
           ) : null}
 
           <div className="grid gap-3 lg:grid-cols-3">
-            <SmallList title="Maps les plus jouees (ranked)" rows={rankedMaps} />
-            <SmallList title="Brawlers les plus joues (ranked)" rows={rankedBrawlers} />
-            <SmallList title="Brawlers les plus bannis (ranked)" rows={rankedBans} />
+            <SmallList title="Maps les plus jouees (ranked, 25 derniers matchs)" rows={rankedMaps} />
+            <SmallList title="Brawlers les plus joues (ranked, 25 derniers matchs)" rows={rankedBrawlers} />
+            <SmallList title="Brawlers les plus bannis (ranked, 25 derniers matchs)" rows={rankedBansRows} />
           </div>
         </div>
       ) : null}

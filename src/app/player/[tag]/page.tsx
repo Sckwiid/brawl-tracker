@@ -108,7 +108,7 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
       return Math.max(max, extractRankedData(raw as Record<string, unknown>));
     }, 0);
     const bestKnownRanked = Math.max(currentRankedElo, peakRankedValue, historyRankedPeak);
-    const currentRankLabel = currentRankedElo > 0 ? formatRank(currentRankedElo) : "Non classe";
+    const currentRankLabel = currentRankedElo > 0 ? formatRank(currentRankedElo) : "Indisponible";
 
     const rankedTopMap = bundle.analytics.mapsRanked[0]?.map ?? "N/A";
     const rankedTopBan = bundle.analytics.rankedBans[0]?.name ?? "N/A";
@@ -136,7 +136,9 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
           <article className="rounded-2xl border border-slate-200 bg-white p-4">
             <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Ranked actuel</p>
             <p className="mt-2 text-2xl font-semibold text-slate-900">{currentRankLabel}</p>
-            <p className="text-sm text-slate-600">{currentRankedElo > 0 ? `${formatNumber(currentRankedElo)} ELO` : "Aucun score"}</p>
+            <p className="text-sm text-slate-600">
+              {currentRankedElo > 0 ? `${formatNumber(currentRankedElo)} ELO` : "API officielle: rang actuel non expose."}
+            </p>
           </article>
           <article className="rounded-2xl border border-slate-200 bg-white p-4">
             <p className="text-xs uppercase tracking-[0.14em] text-slate-500">WR Ranked</p>
@@ -160,7 +162,7 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
           <article className="rounded-2xl border border-slate-200 bg-white p-4">
             <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Ban le plus frequent</p>
             <p className="mt-2 text-xl font-semibold text-slate-900">{rankedTopBan}</p>
-            <p className="text-sm text-slate-600">Sample ranked</p>
+            <p className="text-sm text-slate-600">25 derniers matchs classes</p>
           </article>
         </section>
 
@@ -175,8 +177,8 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
         />
 
         <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-          Certaines stats ranked (saison complete, bans globaux) restent des estimations basees sur le battlelog recent expose
-          par l'API officielle.
+          Certaines stats ranked restent limitees par l'API officielle: rang actuel pas toujours expose, bans souvent absents,
+          et la vue "saison" est estimee depuis les 25 derniers matchs.
         </section>
 
         <p className="text-sm text-slate-500">

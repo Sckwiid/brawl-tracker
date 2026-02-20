@@ -384,6 +384,7 @@ export function calculateWinrate25(battlelog: BattleItem[]): WinrateBreakdown {
 export function computeBattlelogAnalytics(battlelog: BattleItem[], playerTag: string, scanLimit = 60): BattlelogAnalytics {
   const normalizedTag = normalizeTag(playerTag);
   const scanned = battlelog.slice(0, Math.max(25, scanLimit));
+  const focusSample = scanned.slice(0, 25);
   const entries25: Array<{ type: MatchType; outcome: MatchOutcome }> = [];
 
   const mapsOverall = new Map<string, { label: string; counter: Counter }>();
@@ -394,7 +395,7 @@ export function computeBattlelogAnalytics(battlelog: BattleItem[], playerTag: st
   const trophyBrawlers = new Map<string, { identity: BrawlerIdentity; counter: Counter }>();
   const rankedBans = new Map<string, RankedBanStat>();
 
-  for (const item of scanned) {
+  for (const item of focusSample) {
     const type = classifyMatchType(item);
     const outcome = parseOutcome(item);
 
@@ -426,7 +427,7 @@ export function computeBattlelogAnalytics(battlelog: BattleItem[], playerTag: st
   const breakdown = summarizeFromEntries(entries25);
 
   return {
-    sampledMatches: scanned.length,
+    sampledMatches: focusSample.length,
     rankedSampleMatches: breakdown.ranked.matches,
     trophySampleMatches: breakdown.ladder.matches,
     rankedWinrate25: breakdown.rankedWinrate,
