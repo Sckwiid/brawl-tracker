@@ -1,3 +1,5 @@
+"use client";
+
 import brawlersData from "@/data/brawlers.json";
 import { BrawlerStat, BrawlerCatalogEntry } from "@/types/brawl";
 
