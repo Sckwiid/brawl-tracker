@@ -34,6 +34,10 @@ export interface SnapshotBundle {
   changed: boolean;
 }
 
+export interface SnapshotFetchOptions {
+  forceRefresh?: boolean;
+}
+
 async function withDbTimeout<T>(task: Promise<T>, timeoutMs = SUPABASE_TIMEOUT_MS): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`Supabase timeout after ${timeoutMs}ms`)), timeoutMs);
@@ -201,9 +205,15 @@ async function hasHistory(tag: string): Promise<boolean> {
   return Array.isArray(query.data) && query.data.length > 0;
 }
 
-export async function fetchAndStorePlayerSnapshot(tag: string): Promise<SnapshotBundle> {
+export async function fetchAndStorePlayerSnapshot(
+  tag: string,
+  options: SnapshotFetchOptions = {}
+): Promise<SnapshotBundle> {
   const normalizedTag = normalizeTag(tag);
-  const [player, battlelog] = await Promise.all([getPlayer(normalizedTag), getPlayerBattlelog(normalizedTag, 60)]);
+  const [player, battlelog] = await Promise.all([
+    getPlayer(normalizedTag, { forceRefresh: options.forceRefresh }),
+    getPlayerBattlelog(normalizedTag, 60, { forceRefresh: options.forceRefresh })
+  ]);
   const winrates25 = calculateWinrate25(battlelog);
   const analytics = computeBattlelogAnalytics(battlelog, normalizedTag, 60);
   const estimatedPlaytimeHours = estimatePlayerPlaytime(player);

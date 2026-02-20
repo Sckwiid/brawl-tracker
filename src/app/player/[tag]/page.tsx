@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { PlayerTabs } from "@/components/player-tabs";
+import { RefreshStatsButton } from "@/components/refresh-stats-button";
 import { BrawlApiError, extractRankedData, getPlayer } from "@/lib/brawlApi";
 import { fetchAndStorePlayerSnapshot } from "@/lib/snapshots";
 import { formatNumber, formatRank, normalizeTag, toBrawlerSlug } from "@/lib/utils";
@@ -9,6 +10,9 @@ import { BrawlerStat, Player } from "@/types/brawl";
 
 interface PlayerPageProps {
   params: { tag: string };
+  searchParams?: {
+    refresh?: string | string[];
+  };
 }
 
 function asNumber(value: unknown): number {
@@ -88,11 +92,13 @@ export async function generateMetadata({ params }: PlayerPageProps): Promise<Met
 export const revalidate = 20;
 export const dynamic = "force-dynamic";
 
-export default async function PlayerPage({ params }: PlayerPageProps) {
+export default async function PlayerPage({ params, searchParams }: PlayerPageProps) {
   const tag = normalizeTag(decodeURIComponent(params.tag));
+  const forceRefresh =
+    typeof searchParams?.refresh === "string" ? searchParams.refresh.trim() !== "" : Array.isArray(searchParams?.refresh);
 
   try {
-    const bundle = await fetchAndStorePlayerSnapshot(tag);
+    const bundle = await fetchAndStorePlayerSnapshot(tag, { forceRefresh });
     const player = bundle.player;
     const currentRankedElo = extractCurrentRankedElo(player);
     const peakRankedValue = extractRankedData(player);
@@ -122,6 +128,9 @@ export default async function PlayerPage({ params }: PlayerPageProps) {
             </div>
           </div>
         </header>
+        <div className="flex justify-end">
+          <RefreshStatsButton />
+        </div>
 
         <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <article className="rounded-2xl border border-slate-200 bg-white p-4">

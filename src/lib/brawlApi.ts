@@ -18,6 +18,12 @@ const BRAWLIFY_API_BASE_URL = (process.env.BRAWLIFY_API_BASE_URL ?? "https://api
   .replace(/\/+$/, "");
 
 type BrawlApiErrorCode = "UNAUTHORIZED" | "PLAYER_NOT_FOUND" | "MAINTENANCE" | "HTTP_ERROR";
+type BrawlFetchOptions =
+  | number
+  | {
+      revalidate?: number;
+      forceRefresh?: boolean;
+    };
 
 export class BrawlApiError extends Error {
   status: number;
@@ -222,22 +228,28 @@ async function fetchWithTimeout(
   }
 }
 
-async function brawlFetch<T>(path: string, revalidate = 30): Promise<T> {
+async function brawlFetch<T>(path: string, options: BrawlFetchOptions = 30): Promise<T> {
+  const normalized =
+    typeof options === "number"
+      ? { revalidate: options, forceRefresh: false }
+      : { revalidate: options.revalidate ?? 30, forceRefresh: options.forceRefresh ?? false };
   const token = requireToken();
   let response: Response;
   try {
-    response = await fetchWithTimeout(
-      buildBrawlApiUrl(path),
-      {
-        headers: {
-          Authorization: `Bearer ${token}`
-        },
-        next: {
-          revalidate
-        }
+    response = await fetchWithTimeout(buildBrawlApiUrl(path), {
+      headers: {
+        Authorization: `Bearer ${token}`
       },
-      FETCH_TIMEOUT_MS
-    );
+      ...(normalized.forceRefresh
+        ? {
+            cache: "no-store" as const
+          }
+        : {
+            next: {
+              revalidate: normalized.revalidate
+            }
+          })
+    });
   } catch (error) {
     if (isAbortError(error)) {
       throw new BrawlApiError(`Brawl API timeout (${FETCH_TIMEOUT_MS}ms)`, 504, "HTTP_ERROR");
@@ -269,14 +281,21 @@ export function encodePlayerTag(tag: string): string {
   return encodeURIComponent(normalizeTag(tag));
 }
 
-export async function getPlayer(tag: string): Promise<Player> {
+export async function getPlayer(tag: string, options: { forceRefresh?: boolean } = {}): Promise<Player> {
   const safeTag = encodePlayerTag(tag);
-  return brawlFetch<Player>(`/players/${safeTag}`, 20);
+  return brawlFetch<Player>(`/players/${safeTag}`, { revalidate: 20, forceRefresh: options.forceRefresh });
 }
 
-export async function getPlayerBattlelog(tag: string, limit = 25): Promise<BattleItem[]> {
+export async function getPlayerBattlelog(
+  tag: string,
+  limit = 25,
+  options: { forceRefresh?: boolean } = {}
+): Promise<BattleItem[]> {
   const safeTag = encodePlayerTag(tag);
-  const data = await brawlFetch<BrawlListResponse<BattleItem>>(`/players/${safeTag}/battlelog`, 20);
+  const data = await brawlFetch<BrawlListResponse<BattleItem>>(`/players/${safeTag}/battlelog`, {
+    revalidate: 20,
+    forceRefresh: options.forceRefresh
+  });
   const items = data.items ?? [];
   if (limit <= 0) return items;
   return items.slice(0, Math.min(limit, items.length));
@@ -286,12 +305,35 @@ export const getBattlelog = getPlayerBattlelog;
 
 export async function getTopPlayers(limit = 10): Promise<PlayerRanking[]> {
   const data = await brawlFetch<BrawlListResponse<PlayerRanking>>("/rankings/global/players", 120);
-  const parsed = (data.items ?? []).map((item) => ({
-    ...item,
-    rank: Number(item.rank ?? 0),
-    // Important: value de leaderboard mondial = item.trophies (jamais item.rank).
-    trophies: Number(item.trophies ?? 0)
-  }));
+  let parsed = (data.items ?? []).map((item) => {
+    const source = item as PlayerRanking & Record<string, unknown>;
+    return {
+      ...item,
+      rank: Number(item.rank ?? 0),
+      trophies: Number(source.trophies ?? source.score ?? source.value ?? 0)
+    };
+  });
+
+  // Si l'API renvoie des valeurs incohérentes (ex: 1 trophée partout), on enrichit via profils live.
+  const maxTrophies = parsed.reduce((max, entry) => Math.max(max, entry.trophies), 0);
+  const suspicious = parsed.length > 0 && (parsed.every((entry) => entry.trophies <= 25) || maxTrophies < 1000);
+  if (suspicious) {
+    parsed = await Promise.all(
+      parsed.map(async (entry) => {
+        try {
+          const profile = await getPlayer(entry.tag);
+          return {
+            ...entry,
+            name: profile.name || entry.name,
+            trophies: Number(profile.trophies ?? entry.trophies),
+            icon: profile.icon ?? entry.icon
+          };
+        } catch {
+          return entry;
+        }
+      })
+    );
+  }
 
   return parsed.slice(0, limit);
 }
@@ -300,6 +342,11 @@ function parseNumericScore(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
   return 0;
+}
+
+function asUnknownRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
 }
 
 function rankTierFloorFromLabel(value: unknown): number {
@@ -331,27 +378,27 @@ function rankTierFloorFromLabel(value: unknown): number {
   return 0;
 }
 
-export function extractRankedData(player: any): number {
-  if (!player || typeof player !== "object") return 0;
+export function extractRankedData(player: unknown): number {
+  const playerRecord = asUnknownRecord(player);
+  if (!playerRecord) return 0;
 
   const rankedDebug = {
-    highestRankedTrophies: player.highestRankedTrophies,
-    rankedTrophies: player.rankedTrophies,
-    rankedScore: player.rankedScore,
-    elo: player.elo,
-    highest_ranked_trophies: player.highest_ranked_trophies,
-    ranked_trophies: player.ranked_trophies,
-    ranked_score: player.ranked_score,
-    ranked_elo: player.ranked_elo,
-    rankedElo: player.rankedElo,
-    powerLeagueElo: player.powerLeagueElo,
-    power_league_elo: player.power_league_elo,
-    currentElo: player.currentElo,
-    current_elo: player.current_elo,
-    rank: player.rank,
-    rankName: player.rankName,
-    rankedTier: player.rankedTier,
-    rankedLeague: player.rankedLeague
+    highestRankedTrophies: playerRecord.highestRankedTrophies,
+    rankedTrophies: playerRecord.rankedTrophies,
+    rankedScore: playerRecord.rankedScore,
+    elo: playerRecord.elo,
+    highest_ranked_trophies: playerRecord.highest_ranked_trophies,
+    ranked_trophies: playerRecord.ranked_trophies,
+    ranked_score: playerRecord.ranked_score,
+    ranked_elo: playerRecord.ranked_elo,
+    rankedElo: playerRecord.rankedElo,
+    powerLeagueElo: playerRecord.powerLeagueElo,
+    power_league_elo: playerRecord.power_league_elo,
+    currentElo: playerRecord.currentElo,
+    current_elo: playerRecord.current_elo,
+    rankName: playerRecord.rankName,
+    rankedTier: playerRecord.rankedTier,
+    rankedLeague: playerRecord.rankedLeague
   };
 
   const directCandidates = Object.values(rankedDebug);
@@ -364,8 +411,9 @@ export function extractRankedData(player: any): number {
     if (tierFloor > maxValue) maxValue = tierFloor;
   }
 
-  // Fallback souple: l'API change parfois les clés.
-  const stack: unknown[] = [player];
+  // Fallback souple: l'API change parfois les clés, mais on ignore les `rank` génériques
+  // (rang mondial, rang de brawler, etc.) qui faussent le score ranked.
+  const stack: unknown[] = [playerRecord];
   const seen = new Set<unknown>();
 
   while (stack.length > 0) {
@@ -384,7 +432,9 @@ export function extractRankedData(player: any): number {
         continue;
       }
 
-      if (/(highest.?ranked|ranked|elo|power.?league|rank|tier|league)/i.test(key)) {
+      const keyIsRankedLike = /(highest.?ranked|ranked|elo|power.?league|tier|league)/i.test(key);
+      const keyIsGenericRank = /^rank$/i.test(key) || /brawler.*rank/i.test(key);
+      if (keyIsRankedLike && !keyIsGenericRank) {
         const parsed = parseNumericScore(value);
         if (parsed > maxValue) maxValue = parsed;
         const tierFloor = rankTierFloorFromLabel(value);
@@ -405,22 +455,37 @@ export async function getTopRankedPlayers(limit = 10): Promise<RankedLeaderboard
       const data = await brawlFetch<BrawlListResponse<Record<string, unknown>>>(path, 120);
       const items = data.items ?? [];
       const parsed = items
-        .map((item, index) => {
+        .map((item, index): RankedLeaderboardEntry | null => {
           // Important: value de leaderboard classé = item.score (jamais item.rank).
-          const apiScore = parseNumericScore(item.score ?? item.rankedScore ?? item.elo ?? item.value);
-          const extractedScore = extractRankedData(item);
-          const score = Math.max(apiScore, extractedScore);
+          const score = parseNumericScore(
+            item.score ??
+              item.rankedScore ??
+              item.ranked_score ??
+              item.rankedTrophies ??
+              item.ranked_trophies ??
+              item.rankedElo ??
+              item.ranked_elo ??
+              item.elo ??
+              item.powerLeagueElo ??
+              item.power_league_elo ??
+              item.value
+          );
+          // Garde-fou: évite d'afficher des faux ELO (1..10) quand l'endpoint n'expose pas le score ranked.
+          if (score < 100) return null;
           if (score <= 0) return null;
+          // Garde-fou: évite de prendre un score trophées mondial pour du ranked (souvent > 20k).
+          if (score > 20_000) return null;
+          const icon = asUnknownRecord(item.icon);
           return {
             tag: String(item.tag ?? ""),
             name: String(item.name ?? "Unknown"),
             rank: Number(item.rank ?? index + 1),
             score,
-            icon: { id: Number((item.icon as any)?.id ?? 28000000) }
+            icon: { id: Number(icon?.id ?? 28000000) }
           };
         })
-        .filter((e): e is any => e !== null)
-        .slice(0, limit) as RankedLeaderboardEntry[];
+        .filter((entry): entry is RankedLeaderboardEntry => entry !== null)
+        .slice(0, limit);
 
       if (parsed.length > 0) return parsed;
     } catch {

@@ -10,9 +10,11 @@ interface Context {
 
 export async function GET(_request: Request, context: Context) {
   const tag = normalizeTag(decodeURIComponent(context.params.tag));
+  const requestUrl = new URL(_request.url);
+  const forceRefresh = requestUrl.searchParams.has("refresh");
 
   try {
-    const bundle = await fetchAndStorePlayerSnapshot(tag);
+    const bundle = await fetchAndStorePlayerSnapshot(tag, { forceRefresh });
     return NextResponse.json({
       tag,
       player: bundle.player,
