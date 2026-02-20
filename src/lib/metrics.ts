@@ -194,8 +194,9 @@ function summarizeFromEntries(entries: Array<{ type: MatchType; outcome: MatchOu
 
 function readableNameFromValue(value: unknown, fallback = "Inconnu"): string {
   if (typeof value === "string" && value.trim() !== "") return value.trim();
-  if (asRecord(value)) {
-    const first = Object.values(value).find((item) => typeof item === "string" && item.trim() !== "");
+  const record = asRecord(value);
+  if (record) {
+    const first = Object.values(record).find((item) => typeof item === "string" && item.trim() !== "");
     if (typeof first === "string") return first.trim();
   }
   return fallback;
