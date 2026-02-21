@@ -1,32 +1,23 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { CompareTool } from "@/components/compare-tool";
 import { BattlelogAnalytics } from "@/lib/metrics";
-import { HistoryRow } from "@/lib/supabase";
 import { formatRank } from "@/lib/utils";
+import { BattleItem } from "@/types/brawl";
 
 type TabKey = "ranked" | "trophies" | "history" | "versus";
 
 interface PlayerTabsProps {
   playerTag: string;
   analytics: BattlelogAnalytics;
+  battlelog: BattleItem[];
   rankedElo: number;
   currentRankLabel?: string | null;
   highestRankedTrophies?: number | null;
   trophiesCurrent: number;
   trophiesBest: number;
-  history: HistoryRow[];
-}
-
-function localizeDate(value: string): string {
-  try {
-    return new Intl.DateTimeFormat("fr-FR", { day: "2-digit", month: "2-digit" }).format(new Date(value));
-  } catch {
-    return value;
-  }
 }
 
 function stat(value: number): string {
@@ -36,6 +27,50 @@ function stat(value: number): string {
 function winrateLabel(value: number | null): string {
   if (value === null) return "N/A";
   return `${value.toFixed(1)}%`;
+}
+
+function parseBattleTime(value: string | undefined): Date | null {
+  if (!value || value.trim() === "") return null;
+  const compact = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/.exec(value.trim());
+  if (compact) {
+    const [, year, month, day, hour, minute, second] = compact;
+    const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+
+  const fallback = new Date(value);
+  if (!Number.isNaN(fallback.getTime())) return fallback;
+  return null;
+}
+
+function localizeBattleTime(value: string | undefined): string {
+  const parsed = parseBattleTime(value);
+  if (!parsed) return "Date inconnue";
+  return new Intl.DateTimeFormat("fr-FR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(parsed);
+}
+
+function battleOutcome(item: BattleItem): { label: string; tone: "win" | "loss" | "draw" | "unknown" } {
+  const result = String(item.battle?.result ?? "").toLowerCase();
+  if (result.includes("victory") || result.includes("win")) return { label: "Victoire", tone: "win" };
+  if (result.includes("defeat") || result.includes("loss") || result.includes("lose")) return { label: "Defaite", tone: "loss" };
+  if (result.includes("draw")) return { label: "Egalite", tone: "draw" };
+  if (typeof item.battle?.rank === "number") {
+    if (item.battle.rank === 1) return { label: "Victoire", tone: "win" };
+    if (item.battle.rank > 1) return { label: "Defaite", tone: "loss" };
+  }
+  return { label: "Inconnu", tone: "unknown" };
+}
+
+function outcomeClass(tone: "win" | "loss" | "draw" | "unknown"): string {
+  if (tone === "win") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (tone === "loss") return "border-rose-200 bg-rose-50 text-rose-700";
+  if (tone === "draw") return "border-amber-200 bg-amber-50 text-amber-700";
+  return "border-slate-200 bg-slate-50 text-slate-600";
 }
 
 function SmallList({ title, rows }: { title: string; rows: string[] }) {
@@ -58,23 +93,33 @@ function SmallList({ title, rows }: { title: string; rows: string[] }) {
 export function PlayerTabs({
   playerTag,
   analytics,
+  battlelog,
   rankedElo,
   currentRankLabel = null,
   highestRankedTrophies = null,
   trophiesCurrent,
-  trophiesBest,
-  history
+  trophiesBest
 }: PlayerTabsProps) {
   const [tab, setTab] = useState<TabKey>("ranked");
 
-  const chartData = useMemo(
+  const recentMatches = useMemo(
     () =>
-      history.map((item) => ({
-        date: localizeDate(item.snapshot_date),
-        trophies: item.trophies,
-        max: item.highest_trophies
-      })),
-    [history]
+      battlelog.slice(0, 60).map((item, index) => {
+        const mode = String(item.event?.mode ?? item.battle?.mode ?? "").trim() || "Mode inconnu";
+        const map = String(item.event?.map ?? "").trim() || "Map inconnue";
+        const outcome = battleOutcome(item);
+        const trophyChange = typeof item.battle?.trophyChange === "number" ? item.battle.trophyChange : null;
+
+        return {
+          id: `${item.battleTime ?? "unknown"}-${index}`,
+          mode,
+          map,
+          date: localizeBattleTime(item.battleTime),
+          outcome,
+          trophyChange
+        };
+      }),
+    [battlelog]
   );
 
   const rankedLabel = currentRankLabel && currentRankLabel.trim() !== "" ? currentRankLabel : rankedElo > 0 ? formatRank(rankedElo) : "Indisponible";
@@ -201,21 +246,32 @@ export function PlayerTabs({
 
       {tab === "history" ? (
         <div className="space-y-4">
-          <h2 className="text-lg font-semibold text-slate-900">Evolution trophes / record</h2>
-          {chartData.length === 0 ? (
-            <p className="text-sm text-slate-600">Aucun snapshot journalier disponible pour le moment.</p>
+          <h2 className="text-lg font-semibold text-slate-900">Historique des matchs recents</h2>
+          <p className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+            API officielle: historique recent uniquement (pas l'historique complet de toute la saison).
+          </p>
+          {recentMatches.length === 0 ? (
+            <p className="text-sm text-slate-600">Aucun match recent disponible.</p>
           ) : (
-            <div className="h-72 w-full rounded-2xl border border-slate-200 bg-white p-3">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData}>
-                  <XAxis dataKey="date" tick={{ fill: "#475569", fontSize: 11 }} />
-                  <YAxis tick={{ fill: "#475569", fontSize: 11 }} />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="trophies" stroke="#0284c7" strokeWidth={2.5} dot={false} />
-                  <Line type="monotone" dataKey="max" stroke="#059669" strokeWidth={2} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+            <ul className="space-y-2">
+              {recentMatches.map((match) => (
+                <li key={match.id} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${outcomeClass(match.outcome.tone)}`}>
+                        {match.outcome.label}
+                      </span>
+                      <p className="truncate text-sm font-semibold text-slate-900">{match.map}</p>
+                      <p className="truncate text-xs uppercase tracking-[0.12em] text-slate-500">{match.mode}</p>
+                    </div>
+                    <p className="text-xs text-slate-500">{match.date}</p>
+                  </div>
+                  {match.trophyChange !== null ? (
+                    <p className="mt-1 text-xs text-slate-600">Variation trophees: {match.trophyChange > 0 ? `+${match.trophyChange}` : match.trophyChange}</p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       ) : null}

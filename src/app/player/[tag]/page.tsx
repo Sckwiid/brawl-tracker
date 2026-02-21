@@ -149,12 +149,12 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
         <PlayerTabs
           playerTag={player.tag}
           analytics={bundle.analytics}
+          battlelog={bundle.battlelog}
           rankedElo={displayedRankedElo}
           currentRankLabel={currentRankName}
           highestRankedTrophies={bestKnownRanked}
           trophiesCurrent={player.trophies}
           trophiesBest={player.highestTrophies}
-          history={bundle.history}
         />
 
         <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
