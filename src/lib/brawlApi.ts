@@ -22,9 +22,16 @@ const BRAWLAPI_V1_BASE_URL = (process.env.BRAWLAPI_V1_BASE_URL ?? "https://api.b
 const BRAWLAPI_V1_TOKEN = process.env.BRAWLAPI_V1_TOKEN?.trim() ?? "";
 const BRAWLAPI_DEBUG = process.env.BRAWLAPI_DEBUG === "1";
 const BRAWLYTIX_BASE_URL = "https://brawlytix.com";
+const BRAWLTIME_NINJA_BASE_URL = "https://brawltime.ninja";
 const BRAWLYTIX_HEADERS: Record<string, string> = {
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+};
+const BRAWLTIME_HEADERS: Record<string, string> = {
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 };
@@ -392,6 +399,12 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
     return brawlytixSnapshot.snapshot;
   }
 
+  const brawltimeSnapshot = await getBrawlTimeRankedSnapshot(normalizedTag, forceRefresh);
+  attempts.push(brawltimeSnapshot.attempt);
+  if (brawltimeSnapshot.snapshot) {
+    return brawltimeSnapshot.snapshot;
+  }
+
   const headers: Record<string, string> = {
     Accept: "application/json"
   };
@@ -467,9 +480,15 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
   return null;
 }
 
-export async function getPlayer(tag: string, options: { forceRefresh?: boolean } = {}): Promise<Player> {
+export async function getPlayer(
+  tag: string,
+  options: { forceRefresh?: boolean; includeExternalRanked?: boolean } = {}
+): Promise<Player> {
   const safeTag = encodePlayerTag(tag);
   const player = await brawlFetch<Player>(`/players/${safeTag}`, { revalidate: 20, forceRefresh: options.forceRefresh });
+  if (options.includeExternalRanked === false) {
+    return player;
+  }
 
   try {
     const external = await getExternalRankedSnapshot(player.tag, Boolean(options.forceRefresh));
@@ -533,7 +552,7 @@ export async function getTopPlayers(limit = 10): Promise<PlayerRanking[]> {
     parsed = await Promise.all(
       parsed.map(async (entry) => {
         try {
-          const profile = await getPlayer(entry.tag);
+          const profile = await getPlayer(entry.tag, { includeExternalRanked: false });
           return {
             ...entry,
             name: profile.name || entry.name,
@@ -750,6 +769,116 @@ function parseBrawlytixRankedSnapshot(html: string): ExternalRankedSnapshot | nu
   };
 }
 
+function normalizeBrawlTimeLabel(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseBrawlTimeScore(valueText: string): number {
+  const byParentheses = /\(([0-9][0-9,\s.]*)\)/.exec(valueText)?.[1] ?? "";
+  const parsedParentheses = sanitizeRankedScore(parseNumericScore(byParentheses));
+  if (parsedParentheses > 0) return parsedParentheses;
+
+  const numberMatches = [...valueText.matchAll(/([0-9][0-9,\s.]*)/g)]
+    .map((match) => sanitizeRankedScore(parseNumericScore(match[1] ?? "")))
+    .filter((value) => value > 0);
+  return numberMatches.length > 0 ? Math.max(...numberMatches) : 0;
+}
+
+function formatBrawlTimeRankLabel(tierKey: string, divisionRaw: string | null): string | null {
+  const baseByTier: Record<string, string> = {
+    bronze: "Bronze",
+    silver: "Silver",
+    gold: "Gold",
+    diamond: "Diamond",
+    mythic: "Mythic",
+    legendary: "Legendary",
+    masters: "Masters",
+    master: "Masters",
+    pro: "Pro"
+  };
+  const base = baseByTier[tierKey.toLowerCase()];
+  if (!base) return null;
+  const division = (divisionRaw ?? "").trim().toUpperCase();
+  if (!division) return base;
+  if (!["I", "II", "III"].includes(division)) return base;
+  return `${base} ${division}`;
+}
+
+function parseBrawlTimeRankLabel(valueHtml: string, valueText: string): string | null {
+  const tier = /(?:^|\/)rank[_-]([a-z]+)\./i.exec(valueHtml)?.[1] ?? "";
+  const division = /\b(III|II|I)\b/i.exec(valueText)?.[1] ?? null;
+  const fromIcon = formatBrawlTimeRankLabel(tier, division);
+  if (fromIcon) return fromIcon;
+
+  const fromText = /(bronze|silver|gold|diamond|mythic|legendary|masters?|pro)\b/i.exec(valueText)?.[1] ?? "";
+  if (!fromText) return null;
+  return formatBrawlTimeRankLabel(fromText, division);
+}
+
+function extractBrawlTimeRows(html: string): Array<{ label: string; valueHtml: string; valueText: string }> {
+  const rows: Array<{ label: string; valueHtml: string; valueText: string }> = [];
+  const pattern = /<dt[^>]*>([\s\S]*?)<\/dt>\s*<dd[^>]*>([\s\S]*?)<\/dd>/gi;
+  for (let match = pattern.exec(html); match; match = pattern.exec(html)) {
+    const label = stripHtml(match[1] ?? "");
+    const valueHtml = match[2] ?? "";
+    const valueText = stripHtml(valueHtml);
+    if (!label || !valueText) continue;
+    rows.push({ label, valueHtml, valueText });
+  }
+  return rows;
+}
+
+function isCurrentRankLabel(normalizedLabel: string): boolean {
+  return normalizedLabel === "rang" || normalizedLabel === "rank" || normalizedLabel.includes("current rank");
+}
+
+function isPeakRankLabel(normalizedLabel: string): boolean {
+  return (
+    normalizedLabel.includes("rang max") ||
+    normalizedLabel.includes("max rank") ||
+    normalizedLabel.includes("highest rank") ||
+    normalizedLabel.includes("record points")
+  );
+}
+
+function parseBrawlTimeRankedSnapshot(html: string): ExternalRankedSnapshot | null {
+  const rows = extractBrawlTimeRows(html);
+  if (rows.length === 0) return null;
+
+  let currentScore = 0;
+  let peakScore = 0;
+  let currentRankLabel: string | null = null;
+
+  for (const row of rows) {
+    const normalizedLabel = normalizeBrawlTimeLabel(row.label);
+    const score = parseBrawlTimeScore(row.valueText);
+    const rankLabel = parseBrawlTimeRankLabel(row.valueHtml, row.valueText);
+
+    if (isCurrentRankLabel(normalizedLabel)) {
+      if (score > currentScore) currentScore = score;
+      if (rankLabel) currentRankLabel = rankLabel;
+      continue;
+    }
+
+    if (isPeakRankLabel(normalizedLabel)) {
+      if (score > peakScore) peakScore = score;
+    }
+  }
+
+  if (currentScore <= 0 && peakScore <= 0) return null;
+
+  return {
+    score: currentScore,
+    rankLabel: currentRankLabel,
+    peakScore: peakScore > 0 ? peakScore : undefined
+  };
+}
+
 async function getBrawlytixRankedSnapshot(
   normalizedTag: string,
   forceRefresh: boolean
@@ -798,6 +927,55 @@ async function getBrawlytixRankedSnapshot(
   }
 
   const parsed = parseBrawlytixRankedSnapshot(html);
+  if (!parsed) {
+    return { snapshot: null, attempt: `${url} -> no_rank_fields` };
+  }
+  return { snapshot: parsed, attempt: `${url} -> ok` };
+}
+
+async function getBrawlTimeRankedSnapshot(
+  normalizedTag: string,
+  forceRefresh: boolean
+): Promise<{ snapshot: ExternalRankedSnapshot | null; attempt: string }> {
+  const withoutHash = normalizedTag.replace(/^#/, "");
+  const url = `${BRAWLTIME_NINJA_BASE_URL}/profile/${encodeURIComponent(withoutHash)}`;
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      url,
+      forceRefresh
+        ? {
+            cache: "no-store",
+            headers: BRAWLTIME_HEADERS
+          }
+        : {
+            next: {
+              revalidate: 120
+            },
+            headers: BRAWLTIME_HEADERS
+          }
+    );
+  } catch {
+    return { snapshot: null, attempt: `${url} -> network_error` };
+  }
+
+  if (!response.ok) {
+    return { snapshot: null, attempt: `${url} -> http_${response.status}` };
+  }
+
+  let html = "";
+  try {
+    html = await response.text();
+  } catch {
+    return { snapshot: null, attempt: `${url} -> invalid_html` };
+  }
+
+  const lowered = html.toLowerCase();
+  if (lowered.includes("just a moment") || lowered.includes("enable javascript and cookies")) {
+    return { snapshot: null, attempt: `${url} -> blocked_or_challenge` };
+  }
+
+  const parsed = parseBrawlTimeRankedSnapshot(html);
   if (!parsed) {
     return { snapshot: null, attempt: `${url} -> no_rank_fields` };
   }

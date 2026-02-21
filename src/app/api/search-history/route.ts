@@ -50,12 +50,10 @@ export async function GET(request: NextRequest) {
     const items = await readLatest(sessionId);
     return NextResponse.json({ items });
   } catch (error) {
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Unable to read search history"
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      items: [],
+      warning: error instanceof Error ? error.message : "Unable to read search history"
+    });
   }
 }
 
@@ -94,12 +92,16 @@ export async function POST(request: NextRequest) {
       onConflict: "session_id,player_tag"
     });
     if (upsert.error) {
-      return NextResponse.json(
-        {
-          error: `Supabase upsert search_history error: ${upsert.error.message}`
-        },
-        { status: 500 }
-      );
+      return NextResponse.json({
+        items: [
+          {
+            tag,
+            name: playerName,
+            searchedAt: now
+          }
+        ],
+        warning: `Supabase upsert search_history error: ${upsert.error.message}`
+      });
     }
   }
 
