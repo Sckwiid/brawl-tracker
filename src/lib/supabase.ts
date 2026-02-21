@@ -60,12 +60,31 @@ export interface MetaTierRow {
 }
 
 let singleton: SupabaseClient | null = null;
+let warnedSupabaseRole = false;
+
+function decodeJwtRole(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as { role?: unknown };
+    return typeof payload.role === "string" ? payload.role : null;
+  } catch {
+    return null;
+  }
+}
 
 export function getSupabaseAdmin(): SupabaseClient | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRole = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !serviceRole) {
     return null;
+  }
+  if (!warnedSupabaseRole) {
+    const role = decodeJwtRole(serviceRole);
+    if (role && role !== "service_role") {
+      console.error(`[supabase] SUPABASE_SERVICE_ROLE_KEY appears to be role=${role} (expected service_role).`);
+    }
+    warnedSupabaseRole = true;
   }
   if (singleton) {
     return singleton;

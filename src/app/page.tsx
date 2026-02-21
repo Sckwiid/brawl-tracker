@@ -178,8 +178,9 @@ export default async function HomePage() {
       />
 
       <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-        Notes API: l'API officielle n'expose pas un top ranked global fiable. Le bloc "Top Ranked" affiche donc les joueurs
-        deja suivis (snapshots valides). Le cashprize vient de la table Supabase `pro_players`.
+        Notes API: l'API officielle n'expose pas un top ranked global fiable. Le bloc "Top Ranked" utilise d'abord le
+        leaderboard ELO Brawlytix, puis bascule sur les joueurs deja suivis (snapshots valides) si besoin. Le cashprize vient
+        de la table Supabase `pro_players`.
       </section>
     </div>
   );

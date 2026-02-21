@@ -103,7 +103,7 @@ function Board({ title, subtitle, children }: { title: string; subtitle: string;
 export function LeaderboardCarousel({ trophyLeaders, rankedLeaders, esportLeaders, errors }: LeaderboardCarouselProps) {
   return (
     <div className="grid gap-4 lg:grid-cols-3">
-      <Board title="Top Ranked" subtitle="Joueurs suivis (score connu)">
+      <Board title="Top Ranked" subtitle="Brawlytix + snapshots">
         {rankedLeaders.length === 0 ? (
           <p className="text-sm text-rose-600">{errors?.ranked ?? "Top ranked indisponible."}</p>
         ) : (

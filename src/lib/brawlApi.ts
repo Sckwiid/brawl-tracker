@@ -21,6 +21,13 @@ const BRAWLAPI_V1_BASE_URL = (process.env.BRAWLAPI_V1_BASE_URL ?? "https://api.b
   .replace(/\/+$/, "");
 const BRAWLAPI_V1_TOKEN = process.env.BRAWLAPI_V1_TOKEN?.trim() ?? "";
 const BRAWLAPI_DEBUG = process.env.BRAWLAPI_DEBUG === "1";
+const BRAWLYTIX_BASE_URL = "https://brawlytix.com";
+const BRAWLYTIX_HEADERS: Record<string, string> = {
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+};
 
 type BrawlApiErrorCode = "UNAUTHORIZED" | "PLAYER_NOT_FOUND" | "MAINTENANCE" | "HTTP_ERROR";
 type BrawlFetchOptions =
@@ -264,7 +271,7 @@ async function brawlFetch<T>(path: string, options: BrawlFetchOptions = 30): Pro
 function buildBrawlApiV1PlayerUrls(tag: string): string[] {
   const normalized = normalizeTag(tag);
   const withoutHash = normalized.replace(/^#/, "");
-  const bases = [...new Set([BRAWLAPI_V1_BASE_URL, "https://api.brawltools.com"])];
+  const bases = [...new Set([BRAWLAPI_V1_BASE_URL, "https://api.brawltools.com"].map((value) => value.trim()).filter(Boolean))];
   const urls: string[] = [];
 
   for (const base of bases) {
@@ -277,6 +284,10 @@ function buildBrawlApiV1PlayerUrls(tag: string): string[] {
     urls.push(`${base}/players?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
     urls.push(`${base}/v1/player?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
     urls.push(`${base}/v1/player?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
+    urls.push(`${base}/player/${encodeURIComponent(withoutHash)}${useApiKey ? `?api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : ""}`);
+    urls.push(`${base}/players/${encodeURIComponent(withoutHash)}${useApiKey ? `?api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : ""}`);
+    urls.push(`${base}/v1/player/${encodeURIComponent(withoutHash)}${useApiKey ? `?api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : ""}`);
+    urls.push(`${base}/v1/players/${encodeURIComponent(withoutHash)}${useApiKey ? `?api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : ""}`);
   }
 
   return urls;
@@ -326,6 +337,7 @@ export function encodePlayerTag(tag: string): string {
 interface ExternalRankedSnapshot {
   score: number;
   rankLabel: string | null;
+  peakScore?: number;
 }
 
 function hasListLikeContainer(record: Record<string, unknown>): boolean {
@@ -368,10 +380,17 @@ export function extractRankedLabel(player: unknown): string | null {
 }
 
 async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Promise<ExternalRankedSnapshot | null> {
-  if (!BRAWLAPI_V1_BASE_URL) return null;
-
   const normalizedTag = normalizeTag(tag);
   if (!isPossibleBrawlTag(normalizedTag)) return null;
+
+  const attempts: string[] = [];
+
+  // Priorite Brawlytix: c'est la source la plus fiable pour score/ranked elo aujourd'hui.
+  const brawlytixSnapshot = await getBrawlytixRankedSnapshot(normalizedTag, forceRefresh);
+  attempts.push(brawlytixSnapshot.attempt);
+  if (brawlytixSnapshot.snapshot) {
+    return brawlytixSnapshot.snapshot;
+  }
 
   const headers: Record<string, string> = {
     Accept: "application/json"
@@ -384,7 +403,6 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
   }
 
   const urls = [...new Set(buildBrawlApiV1PlayerUrls(normalizedTag))];
-  const attempts: string[] = [];
 
   for (const url of urls) {
     let response: Response;
@@ -462,6 +480,11 @@ export async function getPlayer(tag: string, options: { forceRefresh?: boolean }
       enriched.elo = external.score;
       enriched.rankedScore = external.score;
       enriched.ranked_score = external.score;
+    }
+    if ((external.peakScore ?? 0) > 0) {
+      const peak = Number(external.peakScore ?? 0);
+      enriched.highestRankedTrophies = peak;
+      enriched.highest_ranked_trophies = peak;
     }
     if (external.rankLabel) {
       enriched.rankName = external.rankLabel;
@@ -603,6 +626,182 @@ function isPossibleBrawlTag(tag: string): boolean {
 function sanitizeRankedScore(value: number): number {
   if (value <= 0 || value > MAX_REASONABLE_RANKED_SCORE) return 0;
   return value;
+}
+
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : "";
+    })
+    .replace(/&#(\d+);/g, (_, dec: string) => {
+      const code = Number.parseInt(dec, 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : "";
+    });
+}
+
+function stripHtml(input: string): string {
+  const withoutScripts = input
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ");
+  return decodeHtmlEntities(withoutScripts.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function collectRegexScores(source: string, pattern: RegExp, sanitize = true): number[] {
+  const values: number[] = [];
+  for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+    const raw = match[1] ?? "";
+    const parsed = parseNumericScore(raw);
+    if (!Number.isFinite(parsed)) continue;
+    const score = sanitize ? sanitizeRankedScore(parsed) : parsed;
+    if (score > 0 || (!sanitize && score >= 0)) {
+      values.push(score);
+    }
+  }
+  return values;
+}
+
+function extractStatNumberFromHtml(html: string, label: string): number {
+  const escaped = escapeRegexLiteral(label);
+  const strict = new RegExp(`<div\\s+class=["']stat["'][^>]*>\\s*([^<]+?)\\s*<label>\\s*${escaped}\\s*<\\/label>`, "i");
+  const loose = new RegExp(`([0-9][0-9,\\s.]*)\\s*<label>\\s*${escaped}\\s*<\\/label>`, "i");
+  const fromStrict = strict.exec(html)?.[1] ?? "";
+  const firstTry = sanitizeRankedScore(parseNumericScore(decodeHtmlEntities(fromStrict)));
+  if (firstTry > 0 || parseNumericScore(decodeHtmlEntities(fromStrict)) === 0) return firstTry;
+  const fromLoose = loose.exec(html)?.[1] ?? "";
+  return sanitizeRankedScore(parseNumericScore(decodeHtmlEntities(fromLoose)));
+}
+
+function extractStatNumberFromText(text: string, label: "ranked" | "highest"): number {
+  const normalized = text.replace(/\s+/g, " ").trim();
+
+  if (label === "highest") {
+    const candidates = [
+      ...collectRegexScores(normalized, /([0-9][0-9,\s.]*)\s+Highest\s+Ranked\s+Elo/gi),
+      ...collectRegexScores(normalized, /Highest\s+Ranked\s+Elo[^0-9]{0,24}([0-9][0-9,\s.]*)/gi)
+    ];
+    return candidates.length > 0 ? Math.max(...candidates) : 0;
+  }
+
+  const beforeLabelPattern = /([0-9][0-9,\s.]*)\s+Ranked\s+Elo/gi;
+  const beforeLabelMatches: number[] = [];
+  for (let match = beforeLabelPattern.exec(normalized); match; match = beforeLabelPattern.exec(normalized)) {
+    const context = normalized.slice(Math.max(0, match.index - 22), match.index).toLowerCase();
+    if (context.includes("highest ranked elo")) continue;
+    const parsed = sanitizeRankedScore(parseNumericScore(match[1] ?? ""));
+    if (parsed > 0) beforeLabelMatches.push(parsed);
+  }
+  const afterLabelPattern = /Ranked\s+Elo[^0-9]{0,24}([0-9][0-9,\s.]*)/gi;
+  const afterLabelMatches: number[] = [];
+  for (let match = afterLabelPattern.exec(normalized); match; match = afterLabelPattern.exec(normalized)) {
+    const context = normalized.slice(Math.max(0, match.index - 10), match.index).toLowerCase();
+    if (context.includes("highest")) continue;
+    const parsed = sanitizeRankedScore(parseNumericScore(match[1] ?? ""));
+    if (parsed > 0) afterLabelMatches.push(parsed);
+  }
+
+  const candidates = [...beforeLabelMatches, ...afterLabelMatches];
+  return candidates.length > 0 ? Math.max(...candidates) : 0;
+}
+
+function extractStatNumberFromPayload(html: string, keys: string[]): number {
+  const normalizedKeys = keys.map((key) => escapeRegexLiteral(key));
+  const pattern = new RegExp(`["'](?:${normalizedKeys.join("|")})["']\\s*:\\s*["']?([0-9][0-9,\\s.]*)["']?`, "gi");
+  const matches = collectRegexScores(html, pattern);
+  if (matches.length > 0) {
+    return Math.max(...matches);
+  }
+  return 0;
+}
+
+function parseBrawlytixRankedSnapshot(html: string): ExternalRankedSnapshot | null {
+  const text = stripHtml(html);
+  const current = Math.max(
+    extractStatNumberFromHtml(html, "Ranked Elo"),
+    extractStatNumberFromText(text, "ranked"),
+    extractStatNumberFromPayload(html, ["rankedElo", "rankedScore", "rankscore", "ranked_points", "rankedPoints"])
+  );
+  const peak = Math.max(
+    extractStatNumberFromHtml(html, "Highest Ranked Elo"),
+    extractStatNumberFromText(text, "highest"),
+    extractStatNumberFromPayload(html, [
+      "highestRankedElo",
+      "bestRankedElo",
+      "peakRankedElo",
+      "highestRankedPoints",
+      "highest_ranked_trophies"
+    ])
+  );
+  if (current <= 0 && peak <= 0) return null;
+  return {
+    score: current,
+    rankLabel: null,
+    peakScore: peak > 0 ? peak : undefined
+  };
+}
+
+async function getBrawlytixRankedSnapshot(
+  normalizedTag: string,
+  forceRefresh: boolean
+): Promise<{ snapshot: ExternalRankedSnapshot | null; attempt: string }> {
+  const withoutHash = normalizedTag.replace(/^#/, "");
+  const url = `${BRAWLYTIX_BASE_URL}/profile/${encodeURIComponent(withoutHash)}`;
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      url,
+      forceRefresh
+        ? {
+            cache: "no-store",
+            headers: BRAWLYTIX_HEADERS
+          }
+        : {
+            next: {
+              revalidate: 90
+            },
+            headers: BRAWLYTIX_HEADERS
+          }
+    );
+  } catch {
+    return { snapshot: null, attempt: `${url} -> network_error` };
+  }
+
+  if (!response.ok) {
+    return { snapshot: null, attempt: `${url} -> http_${response.status}` };
+  }
+
+  let html = "";
+  try {
+    html = await response.text();
+  } catch {
+    return { snapshot: null, attempt: `${url} -> invalid_html` };
+  }
+
+  const lowered = html.toLowerCase();
+  if (
+    lowered.includes("just a moment") ||
+    lowered.includes("enable javascript and cookies") ||
+    lowered.includes("cf-challenge") ||
+    lowered.includes("cloudflare")
+  ) {
+    return { snapshot: null, attempt: `${url} -> blocked_or_challenge` };
+  }
+
+  const parsed = parseBrawlytixRankedSnapshot(html);
+  if (!parsed) {
+    return { snapshot: null, attempt: `${url} -> no_rank_fields` };
+  }
+  return { snapshot: parsed, attempt: `${url} -> ok` };
 }
 
 function collectNumericForKeys(source: unknown, allowedKeys: Set<string>): number[] {
@@ -809,7 +1008,67 @@ function readRankedScoreFromRankingItem(item: Record<string, unknown>): number {
   return 0;
 }
 
+function parseBrawlytixRankedLeaderboard(html: string, limit: number): RankedLeaderboardEntry[] {
+  const text = stripHtml(html);
+  const regex = /#\s*(\d{1,4})\s+([^#]{1,64}?)\s+#([0289PYLQGRJCUV]{3,15})\s+([0-9][0-9,\s.]*)/gi;
+  const entries: RankedLeaderboardEntry[] = [];
+  const seen = new Set<string>();
+
+  for (let match = regex.exec(text); match; match = regex.exec(text)) {
+    const rank = Number.parseInt(match[1], 10);
+    const rawName = match[2].replace(/\s+/g, " ").trim();
+    const tag = `#${match[3].toUpperCase()}`;
+    const score = sanitizeRankedScore(parseNumericScore(match[4]));
+    if (!Number.isFinite(rank) || rank <= 0) continue;
+    if (!rawName || rawName.length < 2) continue;
+    if (!isPossibleBrawlTag(tag)) continue;
+    if (score <= 0) continue;
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+
+    entries.push({
+      tag,
+      name: rawName,
+      rank,
+      score,
+      icon: { id: 28000000 }
+    });
+    if (entries.length >= limit) break;
+  }
+
+  return entries.sort((a, b) => a.rank - b.rank || b.score - a.score).slice(0, limit);
+}
+
+async function getBrawlytixTopRankedPlayers(limit: number): Promise<RankedLeaderboardEntry[]> {
+  const url = `${BRAWLYTIX_BASE_URL}/leaderboard/highest-ranked-elo`;
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(url, {
+      headers: BRAWLYTIX_HEADERS,
+      next: {
+        revalidate: 120
+      }
+    });
+  } catch {
+    return [];
+  }
+  if (!response.ok) return [];
+
+  let html = "";
+  try {
+    html = await response.text();
+  } catch {
+    return [];
+  }
+  return parseBrawlytixRankedLeaderboard(html, limit);
+}
+
 export async function getTopRankedPlayers(limit = 10): Promise<RankedLeaderboardEntry[]> {
+  const brawlytixLeaders = await getBrawlytixTopRankedPlayers(limit);
+  if (brawlytixLeaders.length > 0) {
+    return brawlytixLeaders;
+  }
+
   // Source fiable: joueurs suivis et déjà stockés via snapshots API officiels.
   const tracked = await getTrackedRankedLeaders(limit);
   if (tracked.length > 0) {
