@@ -2,7 +2,7 @@ import "server-only";
 
 import { BattleItem, BrawlerCatalogEntry, BrawlListResponse, Player, PlayerRanking } from "@/types/brawl";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { normalizeTag } from "@/lib/utils";
+import { formatRank, normalizeTag } from "@/lib/utils";
 
 const FETCH_TIMEOUT_MS = 10_000;
 const BRAWL_API_TOKEN = process.env.BRAWL_API_TOKEN;
@@ -397,6 +397,12 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
   attempts.push(brawlytixSnapshot.attempt);
   if (brawlytixSnapshot.snapshot) {
     return brawlytixSnapshot.snapshot;
+  }
+
+  const leaderboardSnapshot = await getBrawlytixRankedSnapshotFromLeaderboard(normalizedTag);
+  attempts.push(leaderboardSnapshot.attempt);
+  if (leaderboardSnapshot.snapshot) {
+    return leaderboardSnapshot.snapshot;
   }
 
   const brawltimeSnapshot = await getBrawlTimeRankedSnapshot(normalizedTag, forceRefresh);
@@ -938,48 +944,69 @@ async function getBrawlTimeRankedSnapshot(
   forceRefresh: boolean
 ): Promise<{ snapshot: ExternalRankedSnapshot | null; attempt: string }> {
   const withoutHash = normalizedTag.replace(/^#/, "");
-  const url = `${BRAWLTIME_NINJA_BASE_URL}/profile/${encodeURIComponent(withoutHash)}`;
-  let response: Response;
-  try {
-    response = await fetchWithTimeout(
-      url,
-      forceRefresh
-        ? {
-            cache: "no-store",
-            headers: BRAWLTIME_HEADERS
-          }
-        : {
-            next: {
-              revalidate: 120
-            },
-            headers: BRAWLTIME_HEADERS
-          }
-    );
-  } catch {
-    return { snapshot: null, attempt: `${url} -> network_error` };
+  const urls = [
+    `${BRAWLTIME_NINJA_BASE_URL}/profile/${encodeURIComponent(withoutHash)}`,
+    `${BRAWLTIME_NINJA_BASE_URL}/fr/profile/${encodeURIComponent(withoutHash)}`,
+    `${BRAWLTIME_NINJA_BASE_URL}/en/profile/${encodeURIComponent(withoutHash)}`
+  ];
+  const attempts: string[] = [];
+
+  for (const url of urls) {
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(
+        url,
+        forceRefresh
+          ? {
+              cache: "no-store",
+              headers: {
+                ...BRAWLTIME_HEADERS,
+                Referer: BRAWLTIME_NINJA_BASE_URL
+              }
+            }
+          : {
+              next: {
+                revalidate: 120
+              },
+              headers: {
+                ...BRAWLTIME_HEADERS,
+                Referer: BRAWLTIME_NINJA_BASE_URL
+              }
+            }
+      );
+    } catch {
+      attempts.push(`${url} -> network_error`);
+      continue;
+    }
+
+    if (!response.ok) {
+      attempts.push(`${url} -> http_${response.status}`);
+      continue;
+    }
+
+    let html = "";
+    try {
+      html = await response.text();
+    } catch {
+      attempts.push(`${url} -> invalid_html`);
+      continue;
+    }
+
+    const lowered = html.toLowerCase();
+    if (lowered.includes("just a moment") || lowered.includes("enable javascript and cookies")) {
+      attempts.push(`${url} -> blocked_or_challenge`);
+      continue;
+    }
+
+    const parsed = parseBrawlTimeRankedSnapshot(html);
+    if (!parsed) {
+      attempts.push(`${url} -> no_rank_fields`);
+      continue;
+    }
+    return { snapshot: parsed, attempt: `${url} -> ok` };
   }
 
-  if (!response.ok) {
-    return { snapshot: null, attempt: `${url} -> http_${response.status}` };
-  }
-
-  let html = "";
-  try {
-    html = await response.text();
-  } catch {
-    return { snapshot: null, attempt: `${url} -> invalid_html` };
-  }
-
-  const lowered = html.toLowerCase();
-  if (lowered.includes("just a moment") || lowered.includes("enable javascript and cookies")) {
-    return { snapshot: null, attempt: `${url} -> blocked_or_challenge` };
-  }
-
-  const parsed = parseBrawlTimeRankedSnapshot(html);
-  if (!parsed) {
-    return { snapshot: null, attempt: `${url} -> no_rank_fields` };
-  }
-  return { snapshot: parsed, attempt: `${url} -> ok` };
+  return { snapshot: null, attempt: attempts.join(" | ") };
 }
 
 function collectNumericForKeys(source: unknown, allowedKeys: Set<string>): number[] {
@@ -1239,6 +1266,36 @@ async function getBrawlytixTopRankedPlayers(limit: number): Promise<RankedLeader
     return [];
   }
   return parseBrawlytixRankedLeaderboard(html, limit);
+}
+
+async function getBrawlytixRankedSnapshotFromLeaderboard(
+  normalizedTag: string
+): Promise<{ snapshot: ExternalRankedSnapshot | null; attempt: string }> {
+  try {
+    const leaders = await getBrawlytixTopRankedPlayers(200);
+    if (leaders.length === 0) {
+      return { snapshot: null, attempt: "https://brawlytix.com/leaderboard/highest-ranked-elo -> empty" };
+    }
+
+    const matched = leaders.find((entry) => normalizeTag(entry.tag) === normalizedTag);
+    if (!matched) {
+      return { snapshot: null, attempt: "https://brawlytix.com/leaderboard/highest-ranked-elo -> no_match" };
+    }
+    if (matched.score <= 0) {
+      return { snapshot: null, attempt: "https://brawlytix.com/leaderboard/highest-ranked-elo -> invalid_score" };
+    }
+
+    return {
+      snapshot: {
+        score: matched.score,
+        rankLabel: formatRank(matched.score),
+        peakScore: matched.score
+      },
+      attempt: "https://brawlytix.com/leaderboard/highest-ranked-elo -> matched"
+    };
+  } catch {
+    return { snapshot: null, attempt: "https://brawlytix.com/leaderboard/highest-ranked-elo -> error" };
+  }
 }
 
 export async function getTopRankedPlayers(limit = 10): Promise<RankedLeaderboardEntry[]> {
