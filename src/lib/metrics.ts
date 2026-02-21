@@ -91,7 +91,13 @@ export interface BattlelogAnalytics {
 
 function asNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed !== "") {
+      const normalized = trimmed.replace(/[\u00A0\s,]/g, "");
+      if (Number.isFinite(Number(normalized))) return Number(normalized);
+    }
+  }
   return null;
 }
 
@@ -468,6 +474,7 @@ const MAX_REASONABLE_RANKED_SCORE = 20_000;
 
 const CURRENT_RANKED_KEYS = new Set([
   "rankscore",
+  "rankpoints",
   "rankedpoints",
   "rankedpoint",
   "rankpoint",
@@ -483,6 +490,10 @@ const CURRENT_RANKED_KEYS = new Set([
 ]);
 
 const PEAK_RANKED_KEYS = new Set([
+  "highestrankedpoints",
+  "bestrankedpoints",
+  "maxrankedpoints",
+  "peakrankedpoints",
   "highestrankedtrophies",
   "bestrankedtrophies",
   "bestrankedelo",

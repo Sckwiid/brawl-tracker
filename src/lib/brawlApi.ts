@@ -20,6 +20,7 @@ const BRAWLAPI_V1_BASE_URL = (process.env.BRAWLAPI_V1_BASE_URL ?? "https://api.b
   .trim()
   .replace(/\/+$/, "");
 const BRAWLAPI_V1_TOKEN = process.env.BRAWLAPI_V1_TOKEN?.trim() ?? "";
+const BRAWLAPI_DEBUG = process.env.BRAWLAPI_DEBUG === "1";
 
 type BrawlApiErrorCode = "UNAUTHORIZED" | "PLAYER_NOT_FOUND" | "MAINTENANCE" | "HTTP_ERROR";
 type BrawlFetchOptions =
@@ -298,8 +299,16 @@ function collectStringForKeys(source: unknown, allowedKeys: Set<string>): string
 
     for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
       const normalizedKey = normalizeLookupKey(key);
-      if (allowedKeys.has(normalizedKey) && typeof value === "string" && value.trim() !== "") {
-        values.push(value.trim());
+      if (allowedKeys.has(normalizedKey)) {
+        if (typeof value === "string" && value.trim() !== "") {
+          values.push(value.trim());
+        } else if (value && typeof value === "object") {
+          for (const nested of Object.values(value as Record<string, unknown>)) {
+            if (typeof nested === "string" && nested.trim() !== "") {
+              values.push(nested.trim());
+            }
+          }
+        }
       }
       if (value && typeof value === "object") {
         stack.push(value);
@@ -375,6 +384,7 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
   }
 
   const urls = [...new Set(buildBrawlApiV1PlayerUrls(normalizedTag))];
+  const attempts: string[] = [];
 
   for (const url of urls) {
     let response: Response;
@@ -394,21 +404,27 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
             }
       );
     } catch {
+      attempts.push(`${url} -> network_error`);
       continue;
     }
 
-    if (!response.ok) continue;
+    if (!response.ok) {
+      attempts.push(`${url} -> http_${response.status}`);
+      continue;
+    }
 
     let payload: unknown;
     try {
       payload = await response.json();
     } catch {
+      attempts.push(`${url} -> invalid_json`);
       continue;
     }
 
     const root = asUnknownRecord(payload);
     const taggedRecord = findRecordByTag(payload, normalizedTag);
     if (!taggedRecord && root && hasListLikeContainer(root)) {
+      attempts.push(`${url} -> list_without_tag`);
       continue;
     }
 
@@ -416,6 +432,7 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
     const score = extractRankedData(source);
     const rankLabel = extractRankedLabel(source);
     if (score <= 0 && !rankLabel) {
+      attempts.push(`${url} -> no_rank_fields`);
       continue;
     }
 
@@ -423,6 +440,10 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
       score,
       rankLabel
     };
+  }
+
+  if (BRAWLAPI_DEBUG) {
+    console.warn(`[brawlapi] no ranked snapshot for ${normalizedTag}. attempts=${attempts.join(" | ")}`);
   }
 
   return null;
@@ -508,7 +529,12 @@ export async function getTopPlayers(limit = 10): Promise<PlayerRanking[]> {
 
 function parseNumericScore(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") return 0;
+    const normalized = trimmed.replace(/[\u00A0\s,]/g, "");
+    if (Number.isFinite(Number(normalized))) return Number(normalized);
+  }
   return 0;
 }
 
@@ -521,6 +547,7 @@ const MAX_REASONABLE_RANKED_SCORE = 20_000;
 
 const CURRENT_RANKED_KEYS = new Set([
   "rankscore",
+  "rankpoints",
   "rankedpoints",
   "rankedpoint",
   "rankpoint",
@@ -536,6 +563,10 @@ const CURRENT_RANKED_KEYS = new Set([
 ]);
 
 const PEAK_RANKED_KEYS = new Set([
+  "highestrankedpoints",
+  "bestrankedpoints",
+  "maxrankedpoints",
+  "peakrankedpoints",
   "highestrankedtrophies",
   "bestrankedtrophies",
   "bestrankedelo",
@@ -592,7 +623,13 @@ function collectNumericForKeys(source: unknown, allowedKeys: Set<string>): numbe
     for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
       const normalizedKey = normalizeLookupKey(key);
       if (allowedKeys.has(normalizedKey)) {
-        const score = sanitizeRankedScore(parseNumericScore(value));
+        let score = sanitizeRankedScore(parseNumericScore(value));
+        if (score <= 0 && value && typeof value === "object") {
+          const nested = Object.values(value as Record<string, unknown>)
+            .map((entry) => sanitizeRankedScore(parseNumericScore(entry)))
+            .filter((entry) => entry > 0);
+          score = nested.length > 0 ? Math.max(...nested) : 0;
+        }
         if (score > 0) {
           values.push(score);
         }
@@ -625,7 +662,13 @@ function collectTierFloorsForKeys(source: unknown, allowedKeys: Set<string>): nu
     for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
       const normalizedKey = normalizeLookupKey(key);
       if (allowedKeys.has(normalizedKey)) {
-        const tierFloor = rankTierFloorFromLabel(value);
+        let tierFloor = rankTierFloorFromLabel(value);
+        if (tierFloor <= 0 && value && typeof value === "object") {
+          const nestedFloors = Object.values(value as Record<string, unknown>)
+            .map((entry) => rankTierFloorFromLabel(entry))
+            .filter((entry) => entry > 0);
+          tierFloor = nestedFloors.length > 0 ? Math.max(...nestedFloors) : 0;
+        }
         if (tierFloor > 0) {
           values.push(tierFloor);
         }
