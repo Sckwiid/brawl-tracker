@@ -48,6 +48,10 @@ export interface Player {
   rankedScore?: number;
   elo?: number;
   ranked_score?: number;
+  rankName?: string;
+  currentRankName?: string;
+  rankedTier?: string;
+  currentRankedTier?: string;
   highest_ranked_trophies?: number;
   ranked_trophies?: number;
   expLevel?: number;

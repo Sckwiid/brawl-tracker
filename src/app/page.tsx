@@ -87,7 +87,7 @@ export default async function HomePage() {
     rankedError =
       error instanceof Error
         ? error.message
-        : "Classement ranked indisponible via API officielle. Ajoute des joueurs suivis.";
+        : "Classement ranked indisponible. Recherche quelques joueurs pour alimenter ce top.";
   }
 
   try {
@@ -178,9 +178,8 @@ export default async function HomePage() {
       />
 
       <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-        Notes API: les donnees ranked globales et cashprize ne sont pas toutes exposees nativement par l'API officielle.
-        Ici, le top ranked affiche le global quand disponible, sinon le classement des joueurs deja suivis. Le cashprize
-        vient de la table Supabase `pro_players`.
+        Notes API: l'API officielle n'expose pas un top ranked global fiable. Le bloc "Top Ranked" affiche donc les joueurs
+        deja suivis (snapshots valides). Le cashprize vient de la table Supabase `pro_players`.
       </section>
     </div>
   );

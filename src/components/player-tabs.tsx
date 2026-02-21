@@ -14,6 +14,7 @@ interface PlayerTabsProps {
   playerTag: string;
   analytics: BattlelogAnalytics;
   rankedElo: number;
+  currentRankLabel?: string | null;
   highestRankedTrophies?: number | null;
   trophiesCurrent: number;
   trophiesBest: number;
@@ -58,6 +59,7 @@ export function PlayerTabs({
   playerTag,
   analytics,
   rankedElo,
+  currentRankLabel = null,
   highestRankedTrophies = null,
   trophiesCurrent,
   trophiesBest,
@@ -75,7 +77,7 @@ export function PlayerTabs({
     [history]
   );
 
-  const rankedLabel = rankedElo > 0 ? formatRank(rankedElo) : "Indisponible";
+  const rankedLabel = currentRankLabel && currentRankLabel.trim() !== "" ? currentRankLabel : rankedElo > 0 ? formatRank(rankedElo) : "Indisponible";
   const rankedPeak = Math.max(rankedElo, Number(highestRankedTrophies ?? 0));
 
   const rankedMaps = analytics.mapsRanked.slice(0, 5).map((map) => `${map.map} - ${map.matches} matchs (${map.winrate}%)`);
@@ -129,7 +131,7 @@ export function PlayerTabs({
               <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Niveau Ranked</p>
               <p className="mt-2 text-2xl font-semibold text-slate-900">{rankedLabel}</p>
               <p className="text-sm text-slate-600">
-                {rankedElo > 0 ? `${stat(rankedElo)} ELO` : "L'API officielle ne fournit pas le rang actuel."}
+                {rankedElo > 0 ? `${stat(rankedElo)} ELO` : "Score ELO indisponible pour ce snapshot."}
               </p>
             </article>
             <article className="rounded-2xl border border-slate-200 bg-white p-4">

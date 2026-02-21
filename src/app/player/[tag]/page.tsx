@@ -3,7 +3,8 @@ import Link from "next/link";
 
 import { PlayerTabs } from "@/components/player-tabs";
 import { RefreshStatsButton } from "@/components/refresh-stats-button";
-import { BrawlApiError, extractRankedData, getPlayer } from "@/lib/brawlApi";
+import { BrawlApiError, extractRankedData, extractRankedLabel, getPlayer } from "@/lib/brawlApi";
+import { extractCurrentRankedElo } from "@/lib/metrics";
 import { fetchAndStorePlayerSnapshot } from "@/lib/snapshots";
 import { formatNumber, formatRank, normalizeTag, toBrawlerSlug } from "@/lib/utils";
 import { BrawlerStat, Player } from "@/types/brawl";
@@ -13,32 +14,6 @@ interface PlayerPageProps {
   searchParams?: {
     refresh?: string | string[];
   };
-}
-
-function asNumber(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
-  return 0;
-}
-
-function extractCurrentRankedElo(player: Player): number {
-  const source = player as unknown as Record<string, unknown>;
-  const candidates = [
-    source.elo,
-    source.rankedScore,
-    source.rankedTrophies,
-    source.ranked_score,
-    source.ranked_trophies,
-    source.rankedElo,
-    source.currentElo,
-    source.current_elo
-  ];
-
-  for (const candidate of candidates) {
-    const parsed = asNumber(candidate);
-    if (parsed > 0) return parsed;
-  }
-  return 0;
 }
 
 function brawlerName(name: BrawlerStat["name"], fallback: number): string {
@@ -101,6 +76,7 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
     const bundle = await fetchAndStorePlayerSnapshot(tag, { forceRefresh });
     const player = bundle.player;
     const currentRankedElo = extractCurrentRankedElo(player);
+    const currentRankName = extractRankedLabel(player);
     const peakRankedValue = extractRankedData(player);
     const historyRankedPeak = bundle.history.reduce((max, row) => {
       const raw = row.raw_payload;
@@ -108,7 +84,9 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
       return Math.max(max, extractRankedData(raw as Record<string, unknown>));
     }, 0);
     const bestKnownRanked = Math.max(currentRankedElo, peakRankedValue, historyRankedPeak);
-    const currentRankLabel = currentRankedElo > 0 ? formatRank(currentRankedElo) : "Indisponible";
+    const displayedRankedElo = currentRankedElo > 0 ? currentRankedElo : bestKnownRanked;
+    const isCurrentEstimated = currentRankedElo <= 0 && displayedRankedElo > 0;
+    const currentRankLabel = currentRankName ?? (displayedRankedElo > 0 ? formatRank(displayedRankedElo) : "Indisponible");
 
     const rankedTopMap = bundle.analytics.mapsRanked[0]?.map ?? "N/A";
     const rankedTopBan = bundle.analytics.rankedBans[0]?.name ?? "N/A";
@@ -137,7 +115,9 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
             <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Ranked actuel</p>
             <p className="mt-2 text-2xl font-semibold text-slate-900">{currentRankLabel}</p>
             <p className="text-sm text-slate-600">
-              {currentRankedElo > 0 ? `${formatNumber(currentRankedElo)} ELO` : "API officielle: rang actuel non expose."}
+              {displayedRankedElo > 0
+                ? `${formatNumber(displayedRankedElo)} ELO${isCurrentEstimated ? " (dernier score connu)" : ""}`
+                : "API officielle: rang actuel non expose."}
             </p>
           </article>
           <article className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -169,7 +149,8 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
         <PlayerTabs
           playerTag={player.tag}
           analytics={bundle.analytics}
-          rankedElo={currentRankedElo}
+          rankedElo={displayedRankedElo}
+          currentRankLabel={currentRankName}
           highestRankedTrophies={bestKnownRanked}
           trophiesCurrent={player.trophies}
           trophiesBest={player.highestTrophies}
@@ -177,8 +158,8 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
         />
 
         <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-          Certaines stats ranked restent limitees par l'API officielle: rang actuel pas toujours expose, bans souvent absents,
-          et la vue "saison" est estimee depuis les 25 derniers matchs.
+          Certaines stats ranked restent limitees: le rang/ELO vient d'une source externe quand disponible, les bans sont
+          souvent absents, et la vue "saison" reste une estimation sur les matchs recents.
         </section>
 
         <p className="text-sm text-slate-500">

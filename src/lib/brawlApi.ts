@@ -16,6 +16,10 @@ const BRAWL_API_BASE_URL = /\/v1$/i.test(SANITIZED_BRAWL_API_BASE)
 const BRAWLIFY_API_BASE_URL = (process.env.BRAWLIFY_API_BASE_URL ?? "https://api.brawlify.com/v1")
   .trim()
   .replace(/\/+$/, "");
+const BRAWLAPI_V1_BASE_URL = (process.env.BRAWLAPI_V1_BASE_URL ?? "https://api.brawlapi.com/v1")
+  .trim()
+  .replace(/\/+$/, "");
+const BRAWLAPI_V1_TOKEN = process.env.BRAWLAPI_V1_TOKEN?.trim() ?? "";
 
 type BrawlApiErrorCode = "UNAUTHORIZED" | "PLAYER_NOT_FOUND" | "MAINTENANCE" | "HTTP_ERROR";
 type BrawlFetchOptions =
@@ -256,13 +260,189 @@ async function brawlFetch<T>(path: string, options: BrawlFetchOptions = 30): Pro
   return response.json() as Promise<T>;
 }
 
+function buildBrawlApiV1PlayerUrls(tag: string): string[] {
+  const normalized = normalizeTag(tag);
+  const withoutHash = normalized.replace(/^#/, "");
+
+  return [
+    `${BRAWLAPI_V1_BASE_URL}/players/${encodeURIComponent(normalized)}`,
+    `${BRAWLAPI_V1_BASE_URL}/players/${encodeURIComponent(withoutHash)}`,
+    `${BRAWLAPI_V1_BASE_URL}/player/${encodeURIComponent(normalized)}`,
+    `${BRAWLAPI_V1_BASE_URL}/player/${encodeURIComponent(withoutHash)}`,
+    `${BRAWLAPI_V1_BASE_URL}/players?tag=${encodeURIComponent(normalized)}`,
+    `${BRAWLAPI_V1_BASE_URL}/player?tag=${encodeURIComponent(normalized)}`
+  ];
+}
+
+function collectStringForKeys(source: unknown, allowedKeys: Set<string>): string[] {
+  const values: string[] = [];
+  const stack: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) stack.push(entry);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+      const normalizedKey = normalizeLookupKey(key);
+      if (allowedKeys.has(normalizedKey) && typeof value === "string" && value.trim() !== "") {
+        values.push(value.trim());
+      }
+      if (value && typeof value === "object") {
+        stack.push(value);
+      }
+    }
+  }
+
+  return values;
+}
+
 export function encodePlayerTag(tag: string): string {
   return encodeURIComponent(normalizeTag(tag));
 }
 
+interface ExternalRankedSnapshot {
+  score: number;
+  rankLabel: string | null;
+}
+
+function hasListLikeContainer(record: Record<string, unknown>): boolean {
+  return ["items", "list", "results", "players", "data"].some((key) => Array.isArray(record[key]));
+}
+
+function findRecordByTag(source: unknown, expectedTag: string): Record<string, unknown> | null {
+  const stack: unknown[] = [source];
+  const seen = new Set<unknown>();
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) stack.push(entry);
+      continue;
+    }
+
+    const record = current as Record<string, unknown>;
+    if (typeof record.tag === "string" && normalizeTag(record.tag) === expectedTag) {
+      return record;
+    }
+
+    for (const value of Object.values(record)) {
+      if (value && typeof value === "object") {
+        stack.push(value);
+      }
+    }
+  }
+  return null;
+}
+
+export function extractRankedLabel(player: unknown): string | null {
+  const labels = collectStringForKeys(player, RANKED_TIER_LABEL_KEYS);
+  for (const label of labels) {
+    if (rankTierFloorFromLabel(label) > 0) return label;
+  }
+  return labels[0] ?? null;
+}
+
+async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Promise<ExternalRankedSnapshot | null> {
+  if (!BRAWLAPI_V1_BASE_URL) return null;
+
+  const normalizedTag = normalizeTag(tag);
+  if (!isPossibleBrawlTag(normalizedTag)) return null;
+
+  const headers: Record<string, string> = {
+    Accept: "application/json"
+  };
+  if (BRAWLAPI_V1_TOKEN) {
+    headers.Authorization = `Bearer ${BRAWLAPI_V1_TOKEN}`;
+    headers["x-api-key"] = BRAWLAPI_V1_TOKEN;
+  }
+
+  const urls = [...new Set(buildBrawlApiV1PlayerUrls(normalizedTag))];
+
+  for (const url of urls) {
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(
+        url,
+        forceRefresh
+          ? {
+              headers,
+              cache: "no-store"
+            }
+          : {
+              headers,
+              next: {
+                revalidate: 30
+              }
+            }
+      );
+    } catch {
+      continue;
+    }
+
+    if (!response.ok) continue;
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      continue;
+    }
+
+    const root = asUnknownRecord(payload);
+    const taggedRecord = findRecordByTag(payload, normalizedTag);
+    if (!taggedRecord && root && hasListLikeContainer(root)) {
+      continue;
+    }
+
+    const source = taggedRecord ?? payload;
+    const score = extractRankedData(source);
+    const rankLabel = extractRankedLabel(source);
+    if (score <= 0 && !rankLabel) {
+      continue;
+    }
+
+    return {
+      score,
+      rankLabel
+    };
+  }
+
+  return null;
+}
+
 export async function getPlayer(tag: string, options: { forceRefresh?: boolean } = {}): Promise<Player> {
   const safeTag = encodePlayerTag(tag);
-  return brawlFetch<Player>(`/players/${safeTag}`, { revalidate: 20, forceRefresh: options.forceRefresh });
+  const player = await brawlFetch<Player>(`/players/${safeTag}`, { revalidate: 20, forceRefresh: options.forceRefresh });
+
+  try {
+    const external = await getExternalRankedSnapshot(player.tag, Boolean(options.forceRefresh));
+    if (!external) return player;
+
+    const enriched = { ...player } as Player & Record<string, unknown>;
+    if (external.score > 0) {
+      enriched.elo = external.score;
+      enriched.rankedScore = external.score;
+      enriched.ranked_score = external.score;
+    }
+    if (external.rankLabel) {
+      enriched.rankName = external.rankLabel;
+      enriched.currentRankName = external.rankLabel;
+      enriched.rankedTier = external.rankLabel;
+      enriched.currentRankedTier = external.rankLabel;
+    }
+    return enriched as Player;
+  } catch {
+    return player;
+  }
 }
 
 export async function getPlayerBattlelog(
@@ -328,13 +508,148 @@ function asUnknownRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+const MAX_REASONABLE_RANKED_SCORE = 20_000;
+
+const CURRENT_RANKED_KEYS = new Set([
+  "rankscore",
+  "rankedpoints",
+  "rankedpoint",
+  "rankpoint",
+  "elo",
+  "currentelo",
+  "currentrankedelo",
+  "currentrankedscore",
+  "rankedelo",
+  "rankedscore",
+  "rankedtrophies",
+  "powerleagueelo",
+  "powermatchelo"
+]);
+
+const PEAK_RANKED_KEYS = new Set([
+  "highestrankedtrophies",
+  "bestrankedtrophies",
+  "bestrankedelo",
+  "bestelo",
+  "maxrankedelo",
+  "peakrankedelo",
+  "rankedrecord"
+]);
+
+const RANKED_TIER_LABEL_KEYS = new Set([
+  "rank",
+  "rankname",
+  "league",
+  "tier",
+  "rankedtier",
+  "rankedleague",
+  "currentrankname",
+  "currentrankedtier",
+  "currentrankedleague"
+]);
+
+const BRAWL_TAG_PATTERN = /^#[0289PYLQGRJCUV]+$/;
+
+function normalizeLookupKey(key: string): string {
+  return key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function isPossibleBrawlTag(tag: string): boolean {
+  return BRAWL_TAG_PATTERN.test(tag.toUpperCase());
+}
+
+function sanitizeRankedScore(value: number): number {
+  if (value <= 0 || value > MAX_REASONABLE_RANKED_SCORE) return 0;
+  return value;
+}
+
+function collectNumericForKeys(source: unknown, allowedKeys: Set<string>): number[] {
+  const values: number[] = [];
+  const stack: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) stack.push(entry);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+      const normalizedKey = normalizeLookupKey(key);
+      if (allowedKeys.has(normalizedKey)) {
+        const score = sanitizeRankedScore(parseNumericScore(value));
+        if (score > 0) {
+          values.push(score);
+        }
+      }
+
+      if (value && typeof value === "object") {
+        stack.push(value);
+      }
+    }
+  }
+
+  return values;
+}
+
+function collectTierFloorsForKeys(source: unknown, allowedKeys: Set<string>): number[] {
+  const values: number[] = [];
+  const stack: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) stack.push(entry);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+      const normalizedKey = normalizeLookupKey(key);
+      if (allowedKeys.has(normalizedKey)) {
+        const tierFloor = rankTierFloorFromLabel(value);
+        if (tierFloor > 0) {
+          values.push(tierFloor);
+        }
+      }
+
+      if (value && typeof value === "object") {
+        stack.push(value);
+      }
+    }
+  }
+
+  return values;
+}
+
+function isLikelyOfficialPlayerPayload(payload: unknown, expectedTag: string): boolean {
+  const record = asUnknownRecord(payload);
+  if (!record) return false;
+
+  const payloadTag = normalizeTag(String(record.tag ?? ""));
+  const hasValidName = typeof record.name === "string" && record.name.trim() !== "";
+  const brawlers = Array.isArray(record.brawlers) ? record.brawlers : null;
+  const hasBrawlers = Boolean(brawlers && brawlers.length > 0);
+  const trophies = parseNumericScore(record.trophies);
+  const highestTrophies = parseNumericScore(record.highestTrophies);
+
+  return payloadTag === expectedTag && hasValidName && hasBrawlers && trophies >= 0 && highestTrophies >= 0;
+}
+
 async function getTrackedRankedLeaders(limit: number): Promise<RankedLeaderboardEntry[]> {
   const supabase = getSupabaseAdmin();
   if (!supabase) return [];
 
   const query = await supabase
     .from("players")
-    .select("tag,name,icon_id,raw_payload,last_seen_at")
+    .select("tag,name,icon_id,raw_payload,last_seen_at,last_snapshot_hash")
     .order("last_seen_at", { ascending: false })
     .limit(800);
 
@@ -348,12 +663,16 @@ async function getTrackedRankedLeaders(limit: number): Promise<RankedLeaderboard
     icon_id?: number | null;
     raw_payload?: unknown;
     last_seen_at?: string | null;
+    last_snapshot_hash?: string | null;
   }>;
 
   const parsed = rows
     .map((row) => {
       const tag = normalizeTag(String(row.tag ?? ""));
       if (tag === "#") return null;
+      if (!isPossibleBrawlTag(tag)) return null;
+      if (!String(row.last_snapshot_hash ?? "").trim()) return null;
+      if (!isLikelyOfficialPlayerPayload(row.raw_payload ?? null, tag)) return null;
       const score = extractRankedData(row.raw_payload ?? null);
       if (score <= 0) return null;
       return {
@@ -414,135 +733,68 @@ function rankTierFloorFromLabel(value: unknown): number {
   if (normalized.includes("diam")) return level === 3 ? 4000 : level === 2 ? 3500 : 3000;
   if (normalized.includes("gold") || normalized.includes("or ")) return level === 3 ? 2500 : level === 2 ? 2000 : 1500;
   if (normalized.includes("silver") || normalized.includes("argent")) return level === 3 ? 1250 : level === 2 ? 1000 : 750;
-  if (normalized.includes("bronze")) return level === 3 ? 500 : level === 2 ? 250 : 0;
+  if (normalized.includes("bronze")) return level === 3 ? 500 : level === 2 ? 250 : 1;
 
   return 0;
 }
 
 export function extractRankedData(player: unknown): number {
-  const playerRecord = asUnknownRecord(player);
-  if (!playerRecord) return 0;
+  const numericCurrent = collectNumericForKeys(player, CURRENT_RANKED_KEYS);
+  const numericPeak = collectNumericForKeys(player, PEAK_RANKED_KEYS);
+  const tierFloors = collectTierFloorsForKeys(player, RANKED_TIER_LABEL_KEYS);
+  const candidates = [...numericCurrent, ...numericPeak, ...tierFloors];
+  if (candidates.length === 0) return 0;
+  return Math.max(...candidates);
+}
 
-  const rankedDebug = {
-    highestRankedTrophies: playerRecord.highestRankedTrophies,
-    rankedTrophies: playerRecord.rankedTrophies,
-    rankedScore: playerRecord.rankedScore,
-    elo: playerRecord.elo,
-    highest_ranked_trophies: playerRecord.highest_ranked_trophies,
-    ranked_trophies: playerRecord.ranked_trophies,
-    ranked_score: playerRecord.ranked_score,
-    ranked_elo: playerRecord.ranked_elo,
-    rankedElo: playerRecord.rankedElo,
-    powerLeagueElo: playerRecord.powerLeagueElo,
-    power_league_elo: playerRecord.power_league_elo,
-    currentElo: playerRecord.currentElo,
-    current_elo: playerRecord.current_elo,
-    rankName: playerRecord.rankName,
-    rankedTier: playerRecord.rankedTier,
-    rankedLeague: playerRecord.rankedLeague
-  };
-
-  const directCandidates = Object.values(rankedDebug);
-
-  let maxValue = 0;
-  for (const candidate of directCandidates) {
-    const value = parseNumericScore(candidate);
-    if (value > maxValue) maxValue = value;
-    const tierFloor = rankTierFloorFromLabel(candidate);
-    if (tierFloor > maxValue) maxValue = tierFloor;
+function readRankedScoreFromRankingItem(item: Record<string, unknown>): number {
+  const candidates = collectNumericForKeys(item, CURRENT_RANKED_KEYS);
+  if (candidates.length > 0) {
+    return Math.max(...candidates);
   }
-
-  // Fallback souple: l'API change parfois les clés, mais on ignore les `rank` génériques
-  // (rang mondial, rang de brawler, etc.) qui faussent le score ranked.
-  const stack: unknown[] = [playerRecord];
-  const seen = new Set<unknown>();
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current || typeof current !== "object" || seen.has(current)) continue;
-    seen.add(current);
-
-    if (Array.isArray(current)) {
-      for (const value of current) stack.push(value);
-      continue;
-    }
-
-    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
-      if (value && typeof value === "object") {
-        stack.push(value);
-        continue;
-      }
-
-      const keyIsRankedLike = /(highest.?ranked|ranked|elo|power.?league|tier|league)/i.test(key);
-      const keyIsGenericRank = /^rank$/i.test(key) || /brawler.*rank/i.test(key);
-      if (keyIsRankedLike && !keyIsGenericRank) {
-        const parsed = parseNumericScore(value);
-        if (parsed > maxValue) maxValue = parsed;
-        const tierFloor = rankTierFloorFromLabel(value);
-        if (tierFloor > maxValue) maxValue = tierFloor;
-      }
-    }
-  }
-
-  return maxValue;
+  return 0;
 }
 
 export async function getTopRankedPlayers(limit = 10): Promise<RankedLeaderboardEntry[]> {
-  // Endpoint officiel documenté pour les joueurs.
-  const candidatePaths = ["/rankings/global/players"];
-
-  for (const path of candidatePaths) {
-    try {
-      const data = await brawlFetch<BrawlListResponse<Record<string, unknown>>>(path, 120);
-      const items = data.items ?? [];
-      const parsed = items
-        .map((item, index): RankedLeaderboardEntry | null => {
-          // Important: value de leaderboard classé = item.score (jamais item.rank).
-          const score = parseNumericScore(
-            item.score ??
-              item.rankedScore ??
-              item.ranked_score ??
-              item.rankedTrophies ??
-              item.ranked_trophies ??
-              item.rankedElo ??
-              item.ranked_elo ??
-              item.elo ??
-              item.powerLeagueElo ??
-              item.power_league_elo
-          );
-          // Garde-fou: évite d'afficher des faux ELO (1..10) quand l'endpoint n'expose pas le score ranked.
-          if (score < 100) return null;
-          if (score <= 0) return null;
-          // Garde-fou: évite de prendre un score trophées mondial pour du ranked (souvent > 20k).
-          if (score > 20_000) return null;
-          const icon = asUnknownRecord(item.icon);
-          return {
-            tag: String(item.tag ?? ""),
-            name: String(item.name ?? "Unknown"),
-            rank: Number(item.rank ?? index + 1),
-            score,
-            icon: { id: Number(icon?.id ?? 28000000) }
-          };
-        })
-        .filter((entry): entry is RankedLeaderboardEntry => entry !== null)
-        .slice(0, limit);
-
-      if (parsed.length > 0) return parsed;
-    } catch {
-      // Try next candidate endpoint.
-    }
-  }
-
-  // L'API officielle n'expose pas toujours un leaderboard ranked global exploitable.
-  // Fallback fiable: classement des joueurs déjà suivis et stockés en base.
+  // Source fiable: joueurs suivis et déjà stockés via snapshots API officiels.
   const tracked = await getTrackedRankedLeaders(limit);
   if (tracked.length > 0) {
     return tracked;
   }
 
-  throw new Error(
-    "Classement ranked global indisponible via l'API officielle. Ajoute des joueurs suivis pour alimenter ce top."
-  );
+  // Tentative opportuniste: si l'API expose un score ranked explicite sur le ranking players.
+  try {
+    const data = await brawlFetch<BrawlListResponse<Record<string, unknown>>>("/rankings/global/players", 120);
+    const items = data.items ?? [];
+    const parsed = items
+      .map((item, index): RankedLeaderboardEntry | null => {
+        const tag = normalizeTag(String(item.tag ?? ""));
+        if (tag === "#") return null;
+        if (!isPossibleBrawlTag(tag)) return null;
+
+        const score = readRankedScoreFromRankingItem(item);
+        if (score <= 0) return null;
+
+        const icon = asUnknownRecord(item.icon);
+        return {
+          tag,
+          name: String(item.name ?? "Unknown"),
+          rank: Number(item.rank ?? index + 1),
+          score,
+          icon: { id: Number(icon?.id ?? 28000000) }
+        };
+      })
+      .filter((entry): entry is RankedLeaderboardEntry => entry !== null)
+      .slice(0, limit);
+
+    if (parsed.length > 0) {
+      return parsed;
+    }
+  } catch {
+    // Ignore and raise a clear message below.
+  }
+
+  throw new Error("Classement ranked indisponible. L'API officielle ne fournit pas de top ranked global exploitable.");
 }
 
 export async function getTopEsportLeaders(limit = 10): Promise<EsportLeaderboardEntry[]> {

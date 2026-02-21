@@ -34,6 +34,8 @@ Variables optionnelles:
 
 - `NEXT_PUBLIC_SITE_URL` (defaut local)
 - `BRAWLIFY_API_BASE_URL` (fallback assets/meta)
+- `BRAWLAPI_V1_BASE_URL` (source externe pour rankscore/rang)
+- `BRAWLAPI_V1_TOKEN` (si ton provider BrawlAPI exige une cle)
 
 ## Setup local
 
@@ -66,6 +68,7 @@ npm run dev
 - Le battlelog public est limite au recent, donc le mode "saison" est une **estimation** et non une statistique saison complete certifiee.
 - Les bans ranked ne sont affiches que si les champs correspondants sont presents dans les payloads battlelog.
 - Le leaderboard ranked global est reconstruit par proxy (fallback) quand l'API ne donne pas de classement ranked direct exploitable.
+- Le rang/ELO joueur peut etre enrichi par une source externe BrawlAPI (rankscore), avec fallback automatique si indisponible.
 
 ## Deploiement
 

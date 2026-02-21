@@ -132,6 +132,8 @@ function classifyMatchType(battle: BattleItem): MatchType {
   const key = `${mode} ${type}`;
   if (
     key.includes("ranked") ||
+    key.includes("powermatch") ||
+    key.includes("power match") ||
     key.includes("powerleague") ||
     key.includes("power league") ||
     key.includes("soloranked") ||
@@ -462,70 +464,172 @@ export function estimateAccountValue(player: Player): number {
   return brawlers.length * 170 + power11Count * 50 + brawlers.length * 80;
 }
 
-function readCurrentRankedElo(source: Record<string, unknown>): number {
-  const candidates = [
-    source.elo,
-    source.rankedElo,
-    source.powerLeagueElo,
-    source.currentElo,
-    source.rankedScore,
-    source.trophyLeagueElo
-  ];
+const MAX_REASONABLE_RANKED_SCORE = 20_000;
 
-  for (const candidate of candidates) {
-    const parsed = asNumber(candidate);
-    if (parsed !== null && parsed >= 0) {
-      return parsed;
+const CURRENT_RANKED_KEYS = new Set([
+  "rankscore",
+  "rankedpoints",
+  "rankedpoint",
+  "rankpoint",
+  "elo",
+  "currentelo",
+  "currentrankedelo",
+  "currentrankedscore",
+  "rankedelo",
+  "rankedscore",
+  "rankedtrophies",
+  "powerleagueelo",
+  "powermatchelo"
+]);
+
+const PEAK_RANKED_KEYS = new Set([
+  "highestrankedtrophies",
+  "bestrankedtrophies",
+  "bestrankedelo",
+  "bestelo",
+  "maxrankedelo",
+  "peakrankedelo",
+  "rankedrecord"
+]);
+
+const RANKED_TIER_LABEL_KEYS = new Set([
+  "rank",
+  "rankname",
+  "league",
+  "tier",
+  "rankedtier",
+  "rankedleague",
+  "currentrankname",
+  "currentrankedtier",
+  "currentrankedleague"
+]);
+
+function normalizeLookupKey(key: string): string {
+  return key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function sanitizeRankedScore(value: number | null): number | null {
+  if (value === null) return null;
+  if (value <= 0 || value > MAX_REASONABLE_RANKED_SCORE) return null;
+  return value;
+}
+
+function collectNumericForKeys(source: Record<string, unknown>, allowedKeys: Set<string>): number[] {
+  const values: number[] = [];
+  const stack: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) stack.push(entry);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+      const normalizedKey = normalizeLookupKey(key);
+      if (allowedKeys.has(normalizedKey)) {
+        const parsed = sanitizeRankedScore(asNumber(value));
+        if (parsed !== null) {
+          values.push(parsed);
+        }
+      }
+
+      if (value && typeof value === "object") {
+        stack.push(value);
+      }
     }
   }
 
+  return values;
+}
+
+function collectTierFloorsForKeys(source: Record<string, unknown>, allowedKeys: Set<string>): number[] {
+  const values: number[] = [];
+  const stack: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) stack.push(entry);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+      const normalizedKey = normalizeLookupKey(key);
+      if (allowedKeys.has(normalizedKey)) {
+        const tierFloor = rankTierFloorFromLabel(value);
+        if (tierFloor > 0) {
+          values.push(tierFloor);
+        }
+      }
+
+      if (value && typeof value === "object") {
+        stack.push(value);
+      }
+    }
+  }
+
+  return values;
+}
+
+function rankTierFloorFromLabel(value: unknown): number {
+  if (typeof value !== "string") return 0;
+  const normalized = value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+  if (!normalized) return 0;
+
+  const level = normalized.includes("iii") || normalized.includes(" 3")
+    ? 3
+    : normalized.includes("ii") || normalized.includes(" 2")
+      ? 2
+      : normalized.includes("i") || normalized.includes(" 1")
+        ? 1
+        : 1;
+
+  if (normalized.includes("pro")) return 11250;
+  if (normalized.includes("master")) return level === 3 ? 10250 : level === 2 ? 9250 : 8250;
+  if (normalized.includes("legend")) return level === 3 ? 7500 : level === 2 ? 6750 : 6000;
+  if (normalized.includes("myth")) return level === 3 ? 5500 : level === 2 ? 5000 : 4500;
+  if (normalized.includes("diam")) return level === 3 ? 4000 : level === 2 ? 3500 : 3000;
+  if (normalized.includes("gold") || normalized.includes("or ")) return level === 3 ? 2500 : level === 2 ? 2000 : 1500;
+  if (normalized.includes("silver") || normalized.includes("argent")) return level === 3 ? 1250 : level === 2 ? 1000 : 750;
+  if (normalized.includes("bronze")) return level === 3 ? 500 : level === 2 ? 250 : 1;
   return 0;
+}
+
+function readCurrentRankedElo(source: Record<string, unknown>): number {
+  const candidates = collectNumericForKeys(source, CURRENT_RANKED_KEYS);
+  if (candidates.length === 0) return 0;
+  return Math.max(...candidates);
 }
 
 function looksMasterLike(source: Record<string, unknown>): boolean {
-  const textCandidates = [source.rankName, source.rank, source.currentRank, source.rankedLeague, source.rankedTier];
-
-  for (const raw of textCandidates) {
-    const value = String(raw ?? "").toLowerCase();
-    if (value.includes("master")) {
-      return true;
-    }
-  }
-
-  const numericCandidates = [source.rank, source.currentRankLevel, source.rankedLevel];
-  for (const raw of numericCandidates) {
-    const value = asNumber(raw);
-    if (value !== null && value >= 19) {
-      return true;
-    }
-  }
-
-  return false;
+  const tierCandidates = collectTierFloorsForKeys(source, RANKED_TIER_LABEL_KEYS);
+  return tierCandidates.some((candidate) => candidate >= 8250);
 }
 
 function readHighestRankedElo(source: Record<string, unknown>): number {
-  const candidates = [
-    source.highestRankedTrophies,
-    source.highest_ranked_trophies,
-    source.rankedTrophies,
-    source.ranked_trophies,
-    source.bestRankedTrophies,
-    source.bestElo
-  ];
-
-  for (const candidate of candidates) {
-    const parsed = asNumber(candidate);
-    if (parsed !== null && parsed > 0) {
-      return parsed;
-    }
-  }
-
-  return 0;
+  const direct = collectNumericForKeys(source, PEAK_RANKED_KEYS);
+  const tierFloors = collectTierFloorsForKeys(source, RANKED_TIER_LABEL_KEYS);
+  const candidates = [...direct, ...tierFloors];
+  if (candidates.length === 0) return 0;
+  return Math.max(...candidates);
 }
 
 export function extractRankedElo(player: Player, options: ExtractRankedEloOptions = {}): number {
   const source = player as unknown as Record<string, unknown>;
-  const currentElo = readCurrentRankedElo(source);
+  const currentElo = extractCurrentRankedElo(player);
 
   if (currentElo > 0) {
     return currentElo;
@@ -562,6 +666,11 @@ export function extractRankedElo(player: Player, options: ExtractRankedEloOption
   }
 
   return 0;
+}
+
+export function extractCurrentRankedElo(player: Player): number {
+  const source = player as unknown as Record<string, unknown>;
+  return readCurrentRankedElo(source);
 }
 
 function brawlerName(name: BrawlerStat["name"], fallbackId: number): string {
