@@ -405,6 +405,12 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
     return leaderboardSnapshot.snapshot;
   }
 
+  const officialSnapshot = await getOfficialRankedSnapshotFromGlobalPlayers(normalizedTag);
+  attempts.push(officialSnapshot.attempt);
+  if (officialSnapshot.snapshot) {
+    return officialSnapshot.snapshot;
+  }
+
   const brawltimeSnapshot = await getBrawlTimeRankedSnapshot(normalizedTag, forceRefresh);
   attempts.push(brawltimeSnapshot.attempt);
   if (brawltimeSnapshot.snapshot) {
@@ -1213,6 +1219,62 @@ function readRankedScoreFromRankingItem(item: Record<string, unknown>): number {
   return 0;
 }
 
+async function getOfficialGlobalRankedLeaders(limit: number): Promise<RankedLeaderboardEntry[]> {
+  try {
+    const data = await brawlFetch<BrawlListResponse<Record<string, unknown>>>("/rankings/global/players", 120);
+    const items = data.items ?? [];
+    return items
+      .map((item, index): RankedLeaderboardEntry | null => {
+        const tag = normalizeTag(String(item.tag ?? ""));
+        if (tag === "#") return null;
+        if (!isPossibleBrawlTag(tag)) return null;
+
+        const score = readRankedScoreFromRankingItem(item);
+        if (score <= 0) return null;
+
+        const icon = asUnknownRecord(item.icon);
+        return {
+          tag,
+          name: String(item.name ?? "Unknown"),
+          rank: Number(item.rank ?? index + 1),
+          score,
+          icon: { id: Number(icon?.id ?? 28000000) }
+        };
+      })
+      .filter((entry): entry is RankedLeaderboardEntry => entry !== null)
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+async function getOfficialRankedSnapshotFromGlobalPlayers(
+  normalizedTag: string
+): Promise<{ snapshot: ExternalRankedSnapshot | null; attempt: string }> {
+  try {
+    const leaders = await getOfficialGlobalRankedLeaders(200);
+    if (leaders.length === 0) {
+      return { snapshot: null, attempt: "/rankings/global/players -> empty" };
+    }
+
+    const matched = leaders.find((entry) => normalizeTag(entry.tag) === normalizedTag);
+    if (!matched) {
+      return { snapshot: null, attempt: "/rankings/global/players -> no_match" };
+    }
+
+    return {
+      snapshot: {
+        score: matched.score,
+        rankLabel: formatRank(matched.score),
+        peakScore: matched.score
+      },
+      attempt: "/rankings/global/players -> matched"
+    };
+  } catch {
+    return { snapshot: null, attempt: "/rankings/global/players -> error" };
+  }
+}
+
 function parseBrawlytixRankedLeaderboard(html: string, limit: number): RankedLeaderboardEntry[] {
   const text = stripHtml(html);
   const regex = /#\s*(\d{1,4})\s+([^#]{1,64}?)\s+#([0289PYLQGRJCUV]{3,15})\s+([0-9][0-9,\s.]*)/gi;
@@ -1311,35 +1373,9 @@ export async function getTopRankedPlayers(limit = 10): Promise<RankedLeaderboard
   }
 
   // Tentative opportuniste: si l'API expose un score ranked explicite sur le ranking players.
-  try {
-    const data = await brawlFetch<BrawlListResponse<Record<string, unknown>>>("/rankings/global/players", 120);
-    const items = data.items ?? [];
-    const parsed = items
-      .map((item, index): RankedLeaderboardEntry | null => {
-        const tag = normalizeTag(String(item.tag ?? ""));
-        if (tag === "#") return null;
-        if (!isPossibleBrawlTag(tag)) return null;
-
-        const score = readRankedScoreFromRankingItem(item);
-        if (score <= 0) return null;
-
-        const icon = asUnknownRecord(item.icon);
-        return {
-          tag,
-          name: String(item.name ?? "Unknown"),
-          rank: Number(item.rank ?? index + 1),
-          score,
-          icon: { id: Number(icon?.id ?? 28000000) }
-        };
-      })
-      .filter((entry): entry is RankedLeaderboardEntry => entry !== null)
-      .slice(0, limit);
-
-    if (parsed.length > 0) {
-      return parsed;
-    }
-  } catch {
-    // Ignore and raise a clear message below.
+  const officialLeaders = await getOfficialGlobalRankedLeaders(limit);
+  if (officialLeaders.length > 0) {
+    return officialLeaders;
   }
 
   throw new Error("Classement ranked indisponible. L'API officielle ne fournit pas de top ranked global exploitable.");
