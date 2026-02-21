@@ -34,8 +34,8 @@ Variables optionnelles:
 
 - `NEXT_PUBLIC_SITE_URL` (defaut local)
 - `BRAWLIFY_API_BASE_URL` (fallback assets/meta)
-- `BRAWLAPI_V1_BASE_URL` (source externe pour rankscore/rang)
-- `BRAWLAPI_V1_TOKEN` (si ton provider BrawlAPI exige une cle)
+- `BRAWLAPI_V1_BASE_URL` (source externe pour rankscore/rang, ex: `https://api.brawltools.com`)
+- `BRAWLAPI_V1_TOKEN` (optionnelle pour d'autres providers; inutile avec `api.brawltools.com`)
 
 ## Setup local
 

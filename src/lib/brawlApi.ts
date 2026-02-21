@@ -16,7 +16,7 @@ const BRAWL_API_BASE_URL = /\/v1$/i.test(SANITIZED_BRAWL_API_BASE)
 const BRAWLIFY_API_BASE_URL = (process.env.BRAWLIFY_API_BASE_URL ?? "https://api.brawlify.com/v1")
   .trim()
   .replace(/\/+$/, "");
-const BRAWLAPI_V1_BASE_URL = (process.env.BRAWLAPI_V1_BASE_URL ?? "https://api.brawlapi.com/v1")
+const BRAWLAPI_V1_BASE_URL = (process.env.BRAWLAPI_V1_BASE_URL ?? "https://api.brawltools.com")
   .trim()
   .replace(/\/+$/, "");
 const BRAWLAPI_V1_TOKEN = process.env.BRAWLAPI_V1_TOKEN?.trim() ?? "";
@@ -263,15 +263,22 @@ async function brawlFetch<T>(path: string, options: BrawlFetchOptions = 30): Pro
 function buildBrawlApiV1PlayerUrls(tag: string): string[] {
   const normalized = normalizeTag(tag);
   const withoutHash = normalized.replace(/^#/, "");
+  const bases = [...new Set([BRAWLAPI_V1_BASE_URL, "https://api.brawltools.com"])];
+  const urls: string[] = [];
 
-  return [
-    `${BRAWLAPI_V1_BASE_URL}/players/${encodeURIComponent(normalized)}`,
-    `${BRAWLAPI_V1_BASE_URL}/players/${encodeURIComponent(withoutHash)}`,
-    `${BRAWLAPI_V1_BASE_URL}/player/${encodeURIComponent(normalized)}`,
-    `${BRAWLAPI_V1_BASE_URL}/player/${encodeURIComponent(withoutHash)}`,
-    `${BRAWLAPI_V1_BASE_URL}/players?tag=${encodeURIComponent(normalized)}`,
-    `${BRAWLAPI_V1_BASE_URL}/player?tag=${encodeURIComponent(normalized)}`
-  ];
+  for (const base of bases) {
+    const normalizedBase = base.toLowerCase();
+    const useApiKey = BRAWLAPI_V1_TOKEN && !normalizedBase.includes("api.brawltools.com");
+    const tokenSuffix = useApiKey ? `&api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : "";
+    urls.push(`${base}/player?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
+    urls.push(`${base}/player?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
+    urls.push(`${base}/players?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
+    urls.push(`${base}/players?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
+    urls.push(`${base}/v1/player?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
+    urls.push(`${base}/v1/player?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
+  }
+
+  return urls;
 }
 
 function collectStringForKeys(source: unknown, allowedKeys: Set<string>): string[] {
@@ -360,7 +367,9 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
   const headers: Record<string, string> = {
     Accept: "application/json"
   };
-  if (BRAWLAPI_V1_TOKEN) {
+  const baseForAuth = BRAWLAPI_V1_BASE_URL.toLowerCase();
+  const shouldAttachAuth = Boolean(BRAWLAPI_V1_TOKEN) && !baseForAuth.includes("api.brawltools.com");
+  if (shouldAttachAuth) {
     headers.Authorization = `Bearer ${BRAWLAPI_V1_TOKEN}`;
     headers["x-api-key"] = BRAWLAPI_V1_TOKEN;
   }
@@ -538,6 +547,8 @@ const PEAK_RANKED_KEYS = new Set([
 
 const RANKED_TIER_LABEL_KEYS = new Set([
   "rank",
+  "currentrank",
+  "bestrank",
   "rankname",
   "league",
   "tier",

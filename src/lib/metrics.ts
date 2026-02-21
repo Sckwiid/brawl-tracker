@@ -494,6 +494,8 @@ const PEAK_RANKED_KEYS = new Set([
 
 const RANKED_TIER_LABEL_KEYS = new Set([
   "rank",
+  "currentrank",
+  "bestrank",
   "rankname",
   "league",
   "tier",
