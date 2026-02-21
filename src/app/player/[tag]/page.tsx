@@ -117,7 +117,7 @@ export default async function PlayerPage({ params, searchParams }: PlayerPagePro
             <p className="text-sm text-slate-600">
               {displayedRankedElo > 0
                 ? `${formatNumber(displayedRankedElo)} ELO${isCurrentEstimated ? " (dernier score connu)" : ""}`
-                : "ELO ranked indisponible (source externe non resolue pour ce tag)."}
+                : "ELO ranked indisponible pour ce tag (hors top classe / source externe bloquee)."}
             </p>
           </article>
           <article className="rounded-2xl border border-slate-200 bg-white p-4">

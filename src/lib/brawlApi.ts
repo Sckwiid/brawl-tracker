@@ -16,11 +16,12 @@ const BRAWL_API_BASE_URL = /\/v1$/i.test(SANITIZED_BRAWL_API_BASE)
 const BRAWLIFY_API_BASE_URL = (process.env.BRAWLIFY_API_BASE_URL ?? "https://api.brawlify.com/v1")
   .trim()
   .replace(/\/+$/, "");
-const BRAWLAPI_V1_BASE_URL = (process.env.BRAWLAPI_V1_BASE_URL ?? "https://api.brawltools.com")
+const BRAWLAPI_V1_BASE_URL = (process.env.BRAWLAPI_V1_BASE_URL ?? "https://api.brawlapi.com")
   .trim()
   .replace(/\/+$/, "");
 const BRAWLAPI_V1_TOKEN = process.env.BRAWLAPI_V1_TOKEN?.trim() ?? "";
 const BRAWLAPI_DEBUG = process.env.BRAWLAPI_DEBUG === "1";
+const BRAWLAPI_V1_FALLBACK_BASES = ["https://api.brawlapi.com", "https://api.brawltools.com"];
 const BRAWLYTIX_BASE_URL = "https://brawlytix.com";
 const BRAWLTIME_NINJA_BASE_URL = "https://brawltime.ninja";
 const BRAWLYTIX_HEADERS: Record<string, string> = {
@@ -278,23 +279,29 @@ async function brawlFetch<T>(path: string, options: BrawlFetchOptions = 30): Pro
 function buildBrawlApiV1PlayerUrls(tag: string): string[] {
   const normalized = normalizeTag(tag);
   const withoutHash = normalized.replace(/^#/, "");
-  const bases = [...new Set([BRAWLAPI_V1_BASE_URL, "https://api.brawltools.com"].map((value) => value.trim()).filter(Boolean))];
+  const bases = [
+    ...new Set([BRAWLAPI_V1_BASE_URL, ...BRAWLAPI_V1_FALLBACK_BASES].map((value) => value.trim()).filter(Boolean))
+  ];
   const urls: string[] = [];
 
   for (const base of bases) {
     const normalizedBase = base.toLowerCase();
-    const useApiKey = BRAWLAPI_V1_TOKEN && !normalizedBase.includes("api.brawltools.com");
+    const isBrawlApiPublic = normalizedBase.includes("api.brawlapi.com");
+    const isBrawlToolsPublic = normalizedBase.includes("api.brawltools.com");
+    const useApiKey = BRAWLAPI_V1_TOKEN && !isBrawlApiPublic && !isBrawlToolsPublic;
     const tokenSuffix = useApiKey ? `&api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : "";
-    urls.push(`${base}/player?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
-    urls.push(`${base}/player?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
-    urls.push(`${base}/players?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
-    urls.push(`${base}/players?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
-    urls.push(`${base}/v1/player?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
+
+    // Endpoint officiel documente cote BrawlAPI: /v1/player?tag=<TAG_SANS_HASH>
     urls.push(`${base}/v1/player?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
+    urls.push(`${base}/v1/player?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
+
+    // Fallbacks historiques pour compatibilite de fournisseurs tiers.
+    urls.push(`${base}/player?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
+    urls.push(`${base}/player?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
+    urls.push(`${base}/players?tag=${encodeURIComponent(withoutHash)}${tokenSuffix}`);
+    urls.push(`${base}/players?tag=${encodeURIComponent(normalized)}${tokenSuffix}`);
     urls.push(`${base}/player/${encodeURIComponent(withoutHash)}${useApiKey ? `?api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : ""}`);
-    urls.push(`${base}/players/${encodeURIComponent(withoutHash)}${useApiKey ? `?api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : ""}`);
     urls.push(`${base}/v1/player/${encodeURIComponent(withoutHash)}${useApiKey ? `?api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : ""}`);
-    urls.push(`${base}/v1/players/${encodeURIComponent(withoutHash)}${useApiKey ? `?api_key=${encodeURIComponent(BRAWLAPI_V1_TOKEN)}` : ""}`);
   }
 
   return urls;
@@ -328,6 +335,75 @@ function collectStringForKeys(source: unknown, allowedKeys: Set<string>): string
           }
         }
       }
+      if (value && typeof value === "object") {
+        stack.push(value);
+      }
+    }
+  }
+
+  return values;
+}
+
+function collectNumericForNamedStats(source: unknown, allowedKeys: Set<string>): number[] {
+  const values: number[] = [];
+  const stack: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) stack.push(entry);
+      continue;
+    }
+
+    const record = current as Record<string, unknown>;
+    const rawName = record.name;
+    if (typeof rawName === "string") {
+      const normalizedName = normalizeLookupKey(rawName);
+      if (allowedKeys.has(normalizedName)) {
+        const score = sanitizeRankedScore(parseNumericScore(record.value));
+        if (score > 0) values.push(score);
+      }
+    }
+
+    for (const value of Object.values(record)) {
+      if (value && typeof value === "object") {
+        stack.push(value);
+      }
+    }
+  }
+
+  return values;
+}
+
+function collectStringForNamedStats(source: unknown, allowedKeys: Set<string>): string[] {
+  const values: string[] = [];
+  const stack: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) stack.push(entry);
+      continue;
+    }
+
+    const record = current as Record<string, unknown>;
+    const rawName = record.name;
+    if (typeof rawName === "string") {
+      const normalizedName = normalizeLookupKey(rawName);
+      if (allowedKeys.has(normalizedName) && typeof record.value === "string" && record.value.trim() !== "") {
+        values.push(record.value.trim());
+      }
+    }
+
+    for (const value of Object.values(record)) {
       if (value && typeof value === "object") {
         stack.push(value);
       }
@@ -379,7 +455,7 @@ function findRecordByTag(source: unknown, expectedTag: string): Record<string, u
 }
 
 export function extractRankedLabel(player: unknown): string | null {
-  const labels = collectStringForKeys(player, RANKED_TIER_LABEL_KEYS);
+  const labels = [...collectStringForKeys(player, RANKED_TIER_LABEL_KEYS), ...collectStringForNamedStats(player, RANKED_TIER_LABEL_KEYS)];
   for (const label of labels) {
     if (rankTierFloorFromLabel(label) > 0) return label;
   }
@@ -421,7 +497,8 @@ async function getExternalRankedSnapshot(tag: string, forceRefresh = false): Pro
     Accept: "application/json"
   };
   const baseForAuth = BRAWLAPI_V1_BASE_URL.toLowerCase();
-  const shouldAttachAuth = Boolean(BRAWLAPI_V1_TOKEN) && !baseForAuth.includes("api.brawltools.com");
+  const shouldAttachAuth =
+    Boolean(BRAWLAPI_V1_TOKEN) && !baseForAuth.includes("api.brawltools.com") && !baseForAuth.includes("api.brawlapi.com");
   if (shouldAttachAuth) {
     headers.Authorization = `Bearer ${BRAWLAPI_V1_TOKEN}`;
     headers["x-api-key"] = BRAWLAPI_V1_TOKEN;
@@ -1205,8 +1282,11 @@ function rankTierFloorFromLabel(value: unknown): number {
 export function extractRankedData(player: unknown): number {
   const numericCurrent = collectNumericForKeys(player, CURRENT_RANKED_KEYS);
   const numericPeak = collectNumericForKeys(player, PEAK_RANKED_KEYS);
+  const namedCurrent = collectNumericForNamedStats(player, CURRENT_RANKED_KEYS);
+  const namedPeak = collectNumericForNamedStats(player, PEAK_RANKED_KEYS);
+  const namedTierFloors = collectStringForNamedStats(player, RANKED_TIER_LABEL_KEYS).map((value) => rankTierFloorFromLabel(value));
   const tierFloors = collectTierFloorsForKeys(player, RANKED_TIER_LABEL_KEYS);
-  const candidates = [...numericCurrent, ...numericPeak, ...tierFloors];
+  const candidates = [...numericCurrent, ...numericPeak, ...namedCurrent, ...namedPeak, ...tierFloors, ...namedTierFloors];
   if (candidates.length === 0) return 0;
   return Math.max(...candidates);
 }

@@ -131,7 +131,9 @@ export function PlayerTabs({
               <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Niveau Ranked</p>
               <p className="mt-2 text-2xl font-semibold text-slate-900">{rankedLabel}</p>
               <p className="text-sm text-slate-600">
-                {rankedElo > 0 ? `${stat(rankedElo)} ELO` : "Score ELO indisponible pour ce snapshot."}
+                {rankedElo > 0
+                  ? `${stat(rankedElo)} ELO`
+                  : "Score ELO indisponible (joueur hors top classe ou source externe non accessible)."}
               </p>
             </article>
             <article className="rounded-2xl border border-slate-200 bg-white p-4">

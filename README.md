@@ -34,8 +34,8 @@ Variables optionnelles:
 
 - `NEXT_PUBLIC_SITE_URL` (defaut local)
 - `BRAWLIFY_API_BASE_URL` (fallback assets/meta)
-- `BRAWLAPI_V1_BASE_URL` (source externe pour rankscore/rang, ex: `https://api.brawltools.com`)
-- `BRAWLAPI_V1_TOKEN` (optionnelle pour d'autres providers; inutile avec `api.brawltools.com`)
+- `BRAWLAPI_V1_BASE_URL` (source externe pour rankscore/rang, ex: `https://api.brawlapi.com`)
+- `BRAWLAPI_V1_TOKEN` (optionnelle pour d'autres providers; inutile avec `api.brawlapi.com`)
 - `BRAWLAPI_DEBUG` (`1` pour logs détaillés de fallback ranked dans Vercel)
 
 ## Setup local
